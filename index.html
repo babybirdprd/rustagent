@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RustAgent</title>
+</head>
+<body>
+    <h1>RustAgent Demo</h1>
+    <button onclick="runAutomation()">Run Automation</button>
+    <p id="result"></p>
+
+    <script type="module">
+        import init, { RustAgent } from './pkg/rustagent.js';
+
+        async function run() {
+            await init(); // Initialize WASM
+            window.agent = new RustAgent(); // Global instance
+        }
+
+        window.runAutomation = function() {
+            const result = window.agent.automate("fill out login form");
+            document.getElementById("result").innerText = result;
+        };
+
+        run();
+    </script>
+</body>
+</html>
