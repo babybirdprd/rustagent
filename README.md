@@ -1,5 +1,7 @@
 # RustAgent
 
+![RustAgent Logo](ra_logo.png)
+
 **RustAgent** is an open-source, browser-based web automation tool written in Rust and compiled to WebAssembly (WASM). It serves as a free alternative to tools like OpenAI Operator, offering flexible LLM (Large Language Model) integration and a multi-agent system for automating web tasks. Whether you need to fill forms, navigate pages, or scrape data, RustAgent aims to provide a lightweight, extensible solution.
 
 ## Features
