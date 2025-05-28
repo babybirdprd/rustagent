@@ -1,5 +1,8 @@
 use wasm_bindgen::prelude::*;
 use crate::agent::AgentSystem;
+use web_sys; // Ensure web_sys is imported for console logging
+#[cfg(debug_assertions)]
+use console_error_panic_hook; // For better panic messages
 
 mod agent;
 mod llm;
@@ -21,8 +24,8 @@ impl RustAgent {
 
     // Example method: Automate a task by delegating to agents
     #[wasm_bindgen]
-    pub fn automate(&mut self, task: &str) -> String {
-        self.agents.run_task(task)
+    pub fn automate(&self, task: &str, api_key: &str) -> String {
+        self.agents.run_task(task, api_key)
     }
 }
 
@@ -31,6 +34,6 @@ impl RustAgent {
 pub fn run() -> Result<(), JsValue> {
     #[cfg(debug_assertions)]
     console_error_panic_hook::set_once(); // Better panic messages in browser
-    web_sys::console::log_1(&"RustAgent initialized!".into());
+    web_sys::console::log_1(&"RustAgent WASM module initialized!".into());
     Ok(())
 }

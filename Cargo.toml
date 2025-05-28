@@ -12,6 +12,18 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"       # JSON for API calls
 reqwest = { version = "0.11", features = ["json", "wasm"] }  # HTTP client for LLM API
 tokio = { version = "1", features = ["rt"] }  # Async runtime (optional, for reqwest)
+web-sys = { version = "0.3", features = [
+    "console",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "HtmlInputElement",
+    "Node",
+    "Window"
+]}
 
 [profile.release]
 opt-level = 3  # Optimize for performance
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
