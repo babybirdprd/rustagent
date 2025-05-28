@@ -6,6 +6,7 @@ use console_error_panic_hook; // For better panic messages
 
 mod agent;
 mod llm;
+mod dom_utils; // Declare dom_utils module
 
 // Expose RustAgent to JavaScript
 #[wasm_bindgen]
@@ -34,8 +35,6 @@ impl RustAgent {
         self.model_name = Some(model_name);
         self.api_key = Some(api_key);
     }
-
-use serde::{Serialize, Deserialize}; // For serializing/deserializing results
 
 // ... (rest of the existing imports)
 
@@ -104,6 +103,8 @@ use serde::{Serialize, Deserialize}; // For serializing/deserializing results
         }
     }
 }
+
+use serde::{Serialize, Deserialize}; // For serializing/deserializing results
 
 // Initialize WASM module and log to console
 #[wasm_bindgen(start)]
@@ -298,11 +299,112 @@ mod tests {
         assert_eq!(task2_inner_results.len(), 2);
         
         assert!(task2_inner_results[0].is_err());
-        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("Error clicking element"));
-        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("#element_id_123"));
+        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("Error clicking element: ElementNotFound: No element found for selector '#element_id_123'"));
 
         assert!(task2_inner_results[1].is_err());
-        assert!(task2_inner_results[1].as_ref().err().unwrap().contains("Error reading text from element"));
-        assert!(task2_inner_results[1].as_ref().err().unwrap().contains("#another_element"));
+        assert!(task2_inner_results[1].as_ref().err().unwrap().contains("Error reading text from element: ElementNotFound: No element found for selector '#another_element'"));
+    }
+
+    // Integration tests for new commands via automate()
+    #[wasm_bindgen_test]
+    async fn test_automate_get_url_direct_command() {
+        let agent = setup_agent();
+        let tasks_json = serde_json::to_string(&vec!["GET_URL"]).unwrap();
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert!(results[0].as_ref().unwrap().contains("Agent 3 (Generic): Current URL is:"));
+        assert!(results[0].as_ref().unwrap().contains("http") || results[0].as_ref().unwrap().contains("file:"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_element_exists_direct_command() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        let el = dom_utils::setup_element(&document, "integ-exists-direct", "div", None);
+
+        let tasks_true_json = serde_json::to_string(&vec!["ELEMENT_EXISTS css:#integ-exists-direct"]).unwrap();
+        let result_true_js = agent.automate(tasks_true_json).await.unwrap();
+        let results_true: Vec<Result<String, String>> = serde_json::from_str(&result_true_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_true.len(), 1);
+        assert_eq!(results_true[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-exists-direct' exists: true");
+
+        let tasks_false_json = serde_json::to_string(&vec!["ELEMENT_EXISTS css:#integ-nonexistent-direct"]).unwrap();
+        let result_false_js = agent.automate(tasks_false_json).await.unwrap();
+        let results_false: Vec<Result<String, String>> = serde_json::from_str(&result_false_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_false.len(), 1);
+        assert_eq!(results_false[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-nonexistent-direct' exists: false");
+        
+        dom_utils::cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_wait_for_element_direct_command() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        let el = dom_utils::setup_element(&document, "integ-wait-direct", "div", None);
+
+        let tasks_success_json = serde_json::to_string(&vec!["WAIT_FOR_ELEMENT css:#integ-wait-direct 100"]).unwrap();
+        let result_success_js = agent.automate(tasks_success_json).await.unwrap();
+        let results_success: Vec<Result<String, String>> = serde_json::from_str(&result_success_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_success.len(), 1);
+        assert_eq!(results_success[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-wait-direct' appeared.");
+        
+        dom_utils::cleanup_element(el);
+
+        let tasks_timeout_json = serde_json::to_string(&vec!["WAIT_FOR_ELEMENT css:#integ-wait-timeout-direct 100"]).unwrap();
+        let result_timeout_js = agent.automate(tasks_timeout_json).await.unwrap();
+        let results_timeout: Vec<Result<String, String>> = serde_json::from_str(&result_timeout_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_timeout.len(), 1);
+        assert!(results_timeout[0].is_err());
+        assert!(results_timeout[0].as_ref().err().unwrap().contains("Agent 3 (Generic): Element 'css:#integ-wait-timeout-direct' not found after 100ms timeout"));
+    }
+
+    // LLM-Driven Tests for new commands
+    #[wasm_bindgen_test]
+    async fn test_automate_llm_get_url() {
+        let agent = setup_agent();
+        let tasks_json = serde_json::to_string(&vec!["What is the current page URL?"]).unwrap(); // Mock: [{"action": "GET_URL"}]
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        assert_eq!(results.len(), 1); // LLM response is array, automate executes each
+        let inner_result_str = results[0].as_ref().unwrap(); 
+        let inner_results: Vec<Result<String, String>> = serde_json::from_str(inner_result_str).unwrap();
+        assert_eq!(inner_results.len(), 1);
+        assert!(inner_results[0].is_ok());
+        assert!(inner_results[0].as_ref().unwrap().contains("Current URL is:"));
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_llm_element_exists() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        let el = dom_utils::setup_element(&document, "llm-exists", "div", None); // Matches mock selector
+
+        let tasks_json = serde_json::to_string(&vec!["Is the button #llm-exists present?"]).unwrap(); // Mock: [{"action": "ELEMENT_EXISTS", "selector": "css:#llm-exists"}]
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let inner_results: Vec<Result<String, String>> = serde_json::from_str(results[0].as_ref().unwrap()).unwrap();
+        assert_eq!(inner_results.len(), 1);
+        assert_eq!(inner_results[0].as_ref().unwrap(), "Element 'css:#llm-exists' exists: true");
+        
+        dom_utils::cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_llm_wait_for_element() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        let el = dom_utils::setup_element(&document, "llm-wait-immediate", "div", None); // Matches mock selector
+
+        let tasks_json = serde_json::to_string(&vec!["Wait for #llm-wait-immediate for 100ms"]).unwrap(); // Mock: [{"action": "WAIT_FOR_ELEMENT", "selector": "css:#llm-wait-immediate", "value": "100"}]
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let inner_results: Vec<Result<String, String>> = serde_json::from_str(results[0].as_ref().unwrap()).unwrap();
+        assert_eq!(inner_results.len(), 1);
+        assert_eq!(inner_results[0].as_ref().unwrap(), "Element 'css:#llm-wait-immediate' appeared.");
+
+        dom_utils::cleanup_element(el);
     }
 }

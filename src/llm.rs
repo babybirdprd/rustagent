@@ -25,7 +25,7 @@ pub async fn call_llm_async(prompt: String, api_key: String, api_url: String, mo
     console::log_1(&format!("Payload (REAL): {}", payload.to_string()).into());
 
     let res = client
-        .post(api_url)
+        .post(&api_url) // Changed api_url to &api_url
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&payload)
         .send()
@@ -45,7 +45,7 @@ pub async fn call_llm_async(prompt: String, api_key: String, api_url: String, mo
 
     let response_body: serde_json::Value = res.json().await.map_err(|e| {
         let error_message = format!("JSON parsing error (REAL): {}", e);
-        console::error_1(&error_message.into());
+        console::error_1(&error_message.clone().into()); // Clone error_message for console
         JsValue::from_str(&error_message)
     })?;
 
@@ -128,6 +128,18 @@ pub async fn call_llm_async(prompt: String, _api_key: String, _api_url: String, 
     // --- New Mocks for integration_test.rs ---
     else if prompt.contains("fill username and password and click login") { // For integration test 1
         return Ok("[{\"action\": \"TYPE\", \"selector\": \"css:#testuser\", \"value\": \"testuser\"}, {\"action\": \"TYPE\", \"selector\": \"css:#testpass\", \"value\": \"testpass\"}, {\"action\": \"CLICK\", \"selector\": \"css:#testloginbtn\"}]".to_string());
+    }
+    // --- Mocks for new commands tested in agent.rs and lib.rs ---
+    else if prompt.contains("llm_get_url_task") || prompt.contains("What is the current page URL?") {
+        return Ok("[{\"action\": \"GET_URL\"}]".to_string());
+    } else if prompt.contains("llm_element_exists_true_task") || prompt.contains("Is the button #llm-exists present?") { // Matches agent test
+        return Ok("[{\"action\": \"ELEMENT_EXISTS\", \"selector\": \"css:#llm-exists\"}]".to_string());
+    } else if prompt.contains("llm_element_exists_false_task") || prompt.contains("Is #llm-nonexistent present?") { // Matches agent test
+        return Ok("[{\"action\": \"ELEMENT_EXISTS\", \"selector\": \"css:#llm-nonexistent\"}]".to_string());
+    } else if prompt.contains("llm_wait_for_element_immediate_task") || prompt.contains("Wait for #llm-wait-immediate for 100ms") { // Matches agent test
+        return Ok("[{\"action\": \"WAIT_FOR_ELEMENT\", \"selector\": \"css:#llm-wait-immediate\", \"value\": \"100\"}]".to_string());
+    } else if prompt.contains("llm_wait_for_element_timeout_task") || prompt.contains("Wait for #llm-wait-timeout for 50ms") { // Matches agent test
+        return Ok("[{\"action\": \"WAIT_FOR_ELEMENT\", \"selector\": \"css:#llm-wait-timeout\", \"value\": \"50\"}]".to_string());
     }
     // --- Maintain existing/updated behaviors ---
     else if prompt.contains("this task should fail_llm_call please") {

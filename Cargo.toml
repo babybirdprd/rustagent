@@ -8,10 +8,14 @@ crate-type = ["cdylib"]  # Compile to WASM dynamic library
 
 [dependencies]
 wasm-bindgen = "0.2"     # Bind Rust to JS
+wasm-bindgen-futures = "0.4.50" # For async functions in Wasm
+gloo-timers = { version = "0.3.0", features = ["futures"] }
+futures-util = "0.3" # Rely on other crates to enable necessary features like "stream"
+futures = { version = "0.3.30", default-features = false, features = ["alloc"] } # Added for futures::future::{select, Either}
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"       # JSON for API calls
 reqwest = { version = "=0.10.10", features = ["json"] }  # HTTP client for LLM API
-tokio = { version = "0.2", features = ["macros", "sync", "rt-multi-thread"] }  # Async runtime for reqwest 0.10.x
+tokio = { version = "0.2", features = ["macros", "sync", "rt-core"] }  # Async runtime for reqwest 0.10.x
 web-sys = { version = "0.3", features = [
     "console",
     "Document",
@@ -19,7 +23,11 @@ web-sys = { version = "0.3", features = [
     "HtmlElement",
     "HtmlInputElement",
     "Node",
-    "Window"
+    "Window",
+    "Location",
+    "XPathResult",
+    "NodeList",
+    "HtmlSelectElement"
 ]}
 
 [profile.release]
