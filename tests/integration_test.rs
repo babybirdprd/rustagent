@@ -16,7 +16,10 @@ use web_sys::{Element, HtmlElement, HtmlInputElement, HtmlSelectElement, Documen
 use rustagent::dom_utils::{
     click_element, type_in_element, get_element_text, get_element_value,
     get_element_attribute, set_element_attribute, select_dropdown_option,
+    // get_all_elements_attributes is also available if needed directly, but we test via RustAgent
 };
+use rustagent::RustAgent; // Import RustAgent for automate tests
+use serde_json; // For parsing JSON results from automate
 
 wasm_bindgen_test_configure!(run_in_browser);
 
@@ -259,4 +262,105 @@ async fn test_invalid_xpath_selector_error() {
     let res = get_element_text("xpath://[invalid-xpath");
     assert!(res.is_err());
     assert!(res.unwrap_err().as_string().unwrap().starts_with("InvalidSelector: Invalid XPath expression 'xpath://[invalid-xpath'. Details:"));
+}
+
+
+// --- Tests for GET_ALL_ATTRIBUTES via RustAgent.automate ---
+
+#[wasm_bindgen_test]
+async fn test_get_all_attributes_css_success() {
+    let agent = RustAgent::new();
+    let task_string = "GET_ALL_ATTRIBUTES css:.attr-item data-value";
+    let tasks_json = format!(r#"[["{}"]]"#, task_string);
+
+    let js_value_from_automate = agent.automate(&tasks_json).await.unwrap_or_else(|err| panic!("Automate call failed: {:?}", err));
+    let results_list_json = js_value_from_automate.as_string().expect("Automate result should be a string");
+    let parsed_results: Vec<Result<String, String>> = serde_json::from_str(&results_list_json).unwrap_or_else(|err| panic!("Failed to parse automate results: {}", err));
+
+    assert_eq!(parsed_results.len(), 1, "Expected one result from the task list");
+    let task_result = parsed_results[0].as_ref().unwrap_or_else(|err| panic!("Task failed: {}", err));
+    
+    // Order of elements with class "attr-item": item-1, item-2, item-3, div-item-5
+    // data-value attributes: "apple", null, "cherry", "elderberry"
+    let expected_json_payload = r#"["apple",null,"cherry","elderberry"]"#;
+    assert!(task_result.contains(expected_json_payload), 
+            "Task result '{}' did not contain expected JSON payload '{}'", task_result, expected_json_payload);
+    assert!(task_result.contains("Successfully retrieved attributes 'data-value' for elements matching selector 'css:.attr-item'"));
+}
+
+#[wasm_bindgen_test]
+async fn test_get_all_attributes_xpath_success() {
+    let agent = RustAgent::new();
+    let task_string = "GET_ALL_ATTRIBUTES xpath://span[@class='xpath-attr'] data-fruit";
+    let tasks_json = format!(r#"[["{}"]]"#, task_string);
+
+    let js_value_from_automate = agent.automate(&tasks_json).await.unwrap_or_else(|err| panic!("Automate call failed: {:?}", err));
+    let results_list_json = js_value_from_automate.as_string().expect("Automate result should be a string");
+    let parsed_results: Vec<Result<String, String>> = serde_json::from_str(&results_list_json).unwrap_or_else(|err| panic!("Failed to parse automate results: {}", err));
+
+    assert_eq!(parsed_results.len(), 1, "Expected one result from the task list");
+    let task_result = parsed_results[0].as_ref().unwrap_or_else(|err| panic!("Task failed: {}", err));
+    
+    // Elements: grape, fig, null
+    let expected_json_payload = r#"["grape","fig",null]"#;
+    assert!(task_result.contains(expected_json_payload), 
+            "Task result '{}' did not contain expected JSON payload '{}'", task_result, expected_json_payload);
+    assert!(task_result.contains("Successfully retrieved attributes 'data-fruit' for elements matching selector 'xpath://span[@class='xpath-attr']'"));
+}
+
+#[wasm_bindgen_test]
+async fn test_get_all_attributes_no_elements_found() {
+    let agent = RustAgent::new();
+    let task_string = "GET_ALL_ATTRIBUTES css:.non-existent-class data-value";
+    let tasks_json = format!(r#"[["{}"]]"#, task_string);
+
+    let js_value_from_automate = agent.automate(&tasks_json).await.unwrap_or_else(|err| panic!("Automate call failed: {:?}", err));
+    let results_list_json = js_value_from_automate.as_string().expect("Automate result should be a string");
+    let parsed_results: Vec<Result<String, String>> = serde_json::from_str(&results_list_json).unwrap_or_else(|err| panic!("Failed to parse automate results: {}", err));
+
+    assert_eq!(parsed_results.len(), 1, "Expected one result from the task list");
+    let task_result = parsed_results[0].as_ref().unwrap_or_else(|err| panic!("Task failed: {}", err));
+    
+    let expected_json_payload = r#"[]"#; // Empty array
+    assert!(task_result.contains(expected_json_payload), 
+            "Task result '{}' did not contain expected JSON payload '{}'", task_result, expected_json_payload);
+    assert!(task_result.contains("Successfully retrieved attributes 'data-value' for elements matching selector 'css:.non-existent-class'"));
+}
+
+#[wasm_bindgen_test]
+async fn test_get_all_attributes_attribute_non_existent_on_any() {
+    let agent = RustAgent::new();
+    // Use .attr-item which has 4 matching elements
+    let task_string = "GET_ALL_ATTRIBUTES css:.attr-item data-nonexistent";
+    let tasks_json = format!(r#"[["{}"]]"#, task_string);
+
+    let js_value_from_automate = agent.automate(&tasks_json).await.unwrap_or_else(|err| panic!("Automate call failed: {:?}", err));
+    let results_list_json = js_value_from_automate.as_string().expect("Automate result should be a string");
+    let parsed_results: Vec<Result<String, String>> = serde_json::from_str(&results_list_json).unwrap_or_else(|err| panic!("Failed to parse automate results: {}", err));
+
+    assert_eq!(parsed_results.len(), 1, "Expected one result from the task list");
+    let task_result = parsed_results[0].as_ref().unwrap_or_else(|err| panic!("Task failed: {}", err));
+    
+    // Four elements match .attr-item, none will have 'data-nonexistent'
+    let expected_json_payload = r#"[null,null,null,null]"#;
+    assert!(task_result.contains(expected_json_payload), 
+            "Task result '{}' did not contain expected JSON payload '{}'", task_result, expected_json_payload);
+    assert!(task_result.contains("Successfully retrieved attributes 'data-nonexistent' for elements matching selector 'css:.attr-item'"));
+}
+
+#[wasm_bindgen_test]
+async fn test_get_all_attributes_invalid_selector() {
+    let agent = RustAgent::new();
+    let task_string = "GET_ALL_ATTRIBUTES css:[[[ data-value";
+    let tasks_json = format!(r#"[["{}"]]"#, task_string);
+
+    let js_value_from_automate = agent.automate(&tasks_json).await.unwrap_or_else(|err| panic!("Automate call failed: {:?}", err));
+    let results_list_json = js_value_from_automate.as_string().expect("Automate result should be a string");
+    let parsed_results: Vec<Result<String, String>> = serde_json::from_str(&results_list_json).unwrap_or_else(|err| panic!("Failed to parse automate results: {}", err));
+
+    assert_eq!(parsed_results.len(), 1, "Expected one result from the task list");
+    let task_error = parsed_results[0].as_ref().err().expect("Task should have failed with an error");
+
+    assert!(task_error.contains("InvalidSelector"), "Error message '{}' did not contain 'InvalidSelector'", task_error);
+    assert!(task_error.contains("Error getting all attributes:"), "Error message should specify 'Error getting all attributes'");
 }

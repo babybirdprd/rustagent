@@ -41,6 +41,23 @@
     <div id="nonInputDiv">This is a div, not an input.</div>
     <div id="nonSelectDiv">This is a div, not a select.</div>
 
+    <hr>
+    <h2>For GET_ALL_ATTRIBUTES Tests</h2>
+    <ul id="listForAttrTest">
+        <li class="attr-item" data-id="item-1" data-value="apple">Apple</li>
+        <li class="attr-item" data-id="item-2">Banana (no data-value)</li>
+        <li class="attr-item" data-id="item-3" data-value="cherry">Cherry</li>
+        <li class="other-item" data-id="item-4" data-value="date">Date (different class)</li>
+    </ul>
+    <div class="attr-item" data-id="div-item-5" data-value="elderberry">Elderberry (div)</div>
+    <div data-id="not-attr-item-6">Not an attr-item</div>
+
+    <!-- Elements for testing XPath with GET_ALL_ATTRIBUTES -->
+    <div id="xpathAttrContainer">
+        <span class="xpath-attr" data-fruit="grape">Grape</span>
+        <span class="xpath-attr" data-fruit="fig">Fig</span>
+        <span class="xpath-attr">No data-fruit here</span>
+    </div>
 
     <script>
         // Script for testButton click interaction

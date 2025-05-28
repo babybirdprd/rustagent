@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{console, Window, Document, Element, HtmlElement, HtmlInputElement, XPathResult, Node};
+use web_sys::{console, Window, Document, Element, HtmlElement, HtmlInputElement, XPathResult, Node, NodeList};
+use serde_json; // Added for JSON serialization
 
 // Helper function to get window and document
 fn get_window_document() -> Result<(Window, Document), JsValue> {
@@ -47,6 +48,64 @@ fn get_element(document: &Document, original_selector: &str) -> Result<Element, 
             .ok_or_else(|| JsValue::from_str(&format!("ElementNotFound: No element found for CSS selector '{}'", original_selector)))
     }
 }
+
+// Helper function to get multiple elements using XPath
+fn get_elements_by_xpath_logic(document: &Document, xpath: &str, original_selector: &str) -> Result<Vec<Element>, JsValue> {
+    let result = document
+        .evaluate(xpath, &document, None, XPathResult::ORDERED_NODE_ITERATOR_TYPE, None)
+        .map_err(|e| JsValue::from_str(&format!("InvalidSelector: Invalid XPath expression '{}'. Details: {:?}", original_selector, e.as_string().unwrap_or_else(|| "Unknown XPath error".to_string()))))?;
+
+    let mut elements = Vec::new();
+    while let Ok(Some(node)) = result.iterate_next() {
+        if let Some(element) = node.dyn_ref::<Element>() {
+            elements.push(element.clone());
+        } else {
+            // Log or handle nodes that are not elements if necessary
+            console::warn_1(&format!("XPath selector '{}' returned a Node that is not an Element.", original_selector).into());
+        }
+    }
+    if elements.is_empty() {
+         // Check if this should be an error or an empty vec is acceptable if no elements match
+        // For get_all_elements_attributes, an empty list of attributes is valid if no elements match.
+        // However, if the XPath itself was valid but found no matching elements, an empty Vec is correct.
+        // The single get_element_by_xpath_logic returns ElementNotFound, this one returns Ok(empty_vec)
+    }
+    Ok(elements)
+}
+
+// Unified helper function to get all elements by CSS selector or XPath
+fn get_all_elements(document: &Document, original_selector: &str) -> Result<Vec<Element>, JsValue> {
+    if original_selector.starts_with("xpath:") {
+        let xpath = original_selector.strip_prefix("xpath:").unwrap_or(original_selector);
+        console::log_1(&format!("Using XPath selector for all elements: {}", xpath).into());
+        get_elements_by_xpath_logic(document, xpath, original_selector)
+    } else {
+        let css_selector_to_use;
+        if original_selector.starts_with("css:") {
+            css_selector_to_use = original_selector.strip_prefix("css:").unwrap_or(original_selector);
+            console::log_1(&format!("Using CSS selector for all elements: {}", css_selector_to_use).into());
+        } else {
+            css_selector_to_use = original_selector;
+            console::log_1(&format!("Defaulting to CSS selector for all elements: {}", css_selector_to_use).into());
+        }
+        let node_list: NodeList = document
+            .query_selector_all(css_selector_to_use)
+            .map_err(|e| JsValue::from_str(&format!("InvalidSelector: Invalid CSS selector '{}'. Details: {:?}", original_selector, e.as_string().unwrap_or_else(|| "Unknown querySelectorAll error".to_string()))))?;
+        
+        let mut elements = Vec::new();
+        for i in 0..node_list.length() {
+            if let Some(node) = node_list.item(i) {
+                if let Some(element) = node.dyn_ref::<Element>() {
+                    elements.push(element.clone());
+                }
+            }
+        }
+        // If no elements are found by query_selector_all, it returns an empty NodeList, 
+        // resulting in an empty Vec<Element>, which is acceptable.
+        Ok(elements)
+    }
+}
+
 
 #[wasm_bindgen]
 pub fn click_element(selector: &str) -> Result<(), JsValue> {
@@ -161,35 +220,74 @@ pub fn select_dropdown_option(selector: &str, value: &str) -> Result<(), JsValue
     Ok(())
 }
 
+#[wasm_bindgen]
+pub fn get_all_elements_attributes(selector: &str, attribute_name: &str) -> Result<String, JsValue> {
+    console::log_1(&format!("Attempting to get attribute '{}' from all elements matching selector: {}", attribute_name, selector).into());
+    let (_window, document) = get_window_document()?;
+    
+    let elements = get_all_elements(&document, selector)?;
+    
+    if elements.is_empty() {
+        // If no elements are found, it's not an error; return an empty list JSON.
+        console::log_1(&format!("No elements found for selector '{}'. Returning empty list.", selector).into());
+        return Ok("[]".to_string());
+    }
+
+    let mut attributes_vec: Vec<Option<String>> = Vec::new();
+    for element in elements {
+        attributes_vec.push(element.get_attribute(attribute_name));
+    }
+
+    let json_string = serde_json::to_string(&attributes_vec)
+        .map_err(|e| JsValue::from_str(&format!("SerializationError: Failed to serialize attributes to JSON. Details: {}", e)))?;
+    
+    console::log_1(&format!("Successfully retrieved attributes for selector '{}', attribute '{}'. Count: {}", selector, attribute_name, attributes_vec.len()).into());
+    Ok(json_string)
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;
 
-    wasm_bindgen_test_configure!(run_in_browser); // To run tests in a browser-like environment
+    wasm_bindgen_test_configure!(run_in_browser);
 
-    // Note: These tests primarily check if the functions can be called and return the expected error types
-    // when no actual DOM is present (as is the case in typical `cargo test` or even basic wasm-bindgen-test
-    // without a proper HTML fixture). For full testing, an HTML page with target elements would be needed.
+    // Helper to create and append element for testing
+    fn setup_element(document: &Document, id: &str, tag: &str, attributes: Option<Vec<(&str, &str)>>) -> Element {
+        let el = document.create_element(tag).unwrap();
+        el.set_id(id);
+        if let Some(attrs) = attributes {
+            for (key, value) in attrs {
+                el.set_attribute(key, value).unwrap();
+            }
+        }
+        document.body().unwrap().append_child(&el).unwrap();
+        el
+    }
+
+    // Helper to clean up element
+    fn cleanup_element(element: Element) {
+        element.remove();
+    }
 
     #[wasm_bindgen_test]
     fn test_get_element_css_selector_no_element() {
-        let result = get_element_attribute("css:#nonexistent", "value");
+        let result = get_element_attribute("css:#nonexistent", "value"); // Uses get_element internally
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().as_string().unwrap_or_default(), "ElementNotFound: No element found for CSS selector 'css:#nonexistent'");
     }
 
     #[wasm_bindgen_test]
     fn test_get_element_default_css_selector_no_element() {
-        let result = get_element_attribute("#nonexistent_default", "value");
+        let result = get_element_attribute("#nonexistent_default", "value"); // Uses get_element internally
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().as_string().unwrap_or_default(), "ElementNotFound: No element found for CSS selector '#nonexistent_default'");
     }
     
     #[wasm_bindgen_test]
     fn test_get_element_xpath_selector_no_element() {
-        let result = get_element_attribute("xpath://div[@id='nonexistent_xpath']", "value");
+        let result = get_element_attribute("xpath://div[@id='nonexistent_xpath']", "value"); // Uses get_element internally
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().as_string().unwrap_or_default(), "ElementNotFound: No element found for XPath selector 'xpath://div[@id='nonexistent_xpath']'");
     }
@@ -286,4 +384,92 @@ mod tests {
     // ```
     // However, these tests might be flaky or require more setup depending on the test runner's capabilities.
     // The current subtask focuses on implementing the functions and basic error path checks.
+
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_css_no_elements_found() {
+        let result = get_all_elements_attributes("css:.nonexistent-class", "data-test");
+        assert!(result.is_ok(), "Expected Ok for no elements found, got {:?}", result.err());
+        assert_eq!(result.unwrap(), "[]");
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_xpath_no_elements_found() {
+        let result = get_all_elements_attributes("xpath://div[@class='nonexistent-class-xpath']", "data-test");
+        assert!(result.is_ok(), "Expected Ok for no elements found, got {:?}", result.err());
+        assert_eq!(result.unwrap(), "[]");
+    }
+    
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_css_single_element_with_attribute() {
+        let (_window, document) = get_window_document().unwrap();
+        let el = setup_element(&document, "single-css", "div", Some(vec![("data-test", "value1")]));
+
+        let result = get_all_elements_attributes("css:#single-css", "data-test");
+        assert!(result.is_ok(), "Error: {:?}", result.err());
+        assert_eq!(result.unwrap(), "[\"value1\"]");
+        
+        cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_xpath_single_element_with_attribute() {
+        let (_window, document) = get_window_document().unwrap();
+        let el = setup_element(&document, "single-xpath", "div", Some(vec![("data-test", "value-xpath")]));
+
+        let result = get_all_elements_attributes("xpath://div[@id='single-xpath']", "data-test");
+        assert!(result.is_ok(), "Error: {:?}", result.err());
+        assert_eq!(result.unwrap(), "[\"value-xpath\"]");
+        
+        cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_multiple_elements_some_with_attr() {
+        let (_window, document) = get_window_document().unwrap();
+        let el1 = setup_element(&document, "multi1", "span", Some(vec![("class", "target-multi"), ("data-id", "1")]));
+        let el2 = setup_element(&document, "multi2", "span", Some(vec![("class", "target-multi")])); // No data-id
+        let el3 = setup_element(&document, "multi3", "span", Some(vec![("class", "target-multi"), ("data-id", "3")]));
+        
+        let result = get_all_elements_attributes("css:.target-multi", "data-id");
+        assert!(result.is_ok(), "Error: {:?}", result.err());
+        assert_eq!(result.unwrap(), "[\"1\",null,\"3\"]"); // serde_json serializes Option<String>::None as null
+
+        cleanup_element(el1);
+        cleanup_element(el2);
+        cleanup_element(el3);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_xpath_multiple_elements() {
+        let (_window, document) = get_window_document().unwrap();
+        let el1 = setup_element(&document, "xpath-multi1", "a", Some(vec![("href", "/page1"), ("data-common", "val") ]));
+        let el2 = setup_element(&document, "xpath-multi2", "a", Some(vec![("data-common", "val")])); // No href
+        let el3 = setup_element(&document, "xpath-multi3", "a", Some(vec![("href", "/page3"), ("data-common", "val")]));
+        
+        // Using XPath to select all 'a' elements with 'data-common' attribute
+        let result = get_all_elements_attributes("xpath://a[@data-common='val']", "href");
+        assert!(result.is_ok(), "Error: {:?}", result.err());
+        // Order depends on document order, assuming they are appended in order el1, el2, el3
+        assert_eq!(result.unwrap(), "[\"/page1\",null,\"/page3\"]");
+
+        cleanup_element(el1);
+        cleanup_element(el2);
+        cleanup_element(el3);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_invalid_css_selector() {
+        let result = get_all_elements_attributes("css:[invalid-selector", "data-test");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().as_string().unwrap_or_default();
+        assert!(err_msg.starts_with("InvalidSelector: Invalid CSS selector 'css:[invalid-selector'. Details:"));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_elements_attributes_invalid_xpath_selector() {
+        let result = get_all_elements_attributes("xpath://[invalid-xpath", "data-test");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().as_string().unwrap_or_default();
+        assert!(err_msg.starts_with("InvalidSelector: Invalid XPath expression 'xpath://[invalid-xpath'. Details:"));
+    }
 }
