@@ -59,6 +59,19 @@
         <span class="xpath-attr">No data-fruit here</span>
     </div>
 
+    <hr>
+    <h2>For New Integration Tests</h2>
+    <!-- Scenario 1: LLM-Suggested DOM Command Sequence -->
+    <input type="text" id="testuser" placeholder="Username">
+    <input type="password" id="testpass" placeholder="Password">
+    <button id="testloginbtn">Login</button>
+    <div id="loginStatus">Not logged in</div>
+
+    <!-- Scenario 2: {{PREVIOUS_RESULT}} Placeholder -->
+    <div id="dataelement">Expected Text for Placeholder Test</div>
+    <input type="text" id="inputfield" placeholder="Input for placeholder test">
+
+
     <script>
         // Script for testButton click interaction
         const button = document.getElementById('testButton');
@@ -66,6 +79,21 @@
         if (button && resultSpan) {
             button.addEventListener('click', () => {
                 resultSpan.textContent = 'Button Clicked!';
+            });
+        }
+
+        // Script for testloginbtn interaction
+        const loginButton = document.getElementById('testloginbtn');
+        const loginStatusDiv = document.getElementById('loginStatus');
+        if (loginButton && loginStatusDiv) {
+            loginButton.addEventListener('click', () => {
+                const user = document.getElementById('testuser').value;
+                const pass = document.getElementById('testpass').value;
+                if (user === "testuser" && pass === "testpass") {
+                    loginStatusDiv.textContent = 'Login Successful!';
+                } else {
+                    loginStatusDiv.textContent = 'Login Failed!';
+                }
             });
         }
     </script>

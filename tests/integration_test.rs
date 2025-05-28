@@ -364,3 +364,104 @@ async fn test_get_all_attributes_invalid_selector() {
     assert!(task_error.contains("InvalidSelector"), "Error message '{}' did not contain 'InvalidSelector'", task_error);
     assert!(task_error.contains("Error getting all attributes:"), "Error message should specify 'Error getting all attributes'");
 }
+
+
+// --- New Integration Tests for LLM-suggested commands and {{PREVIOUS_RESULT}} placeholder ---
+
+fn setup_agent_for_integration_tests() -> RustAgent {
+    let mut agent = RustAgent::new();
+    // It's crucial that mock-llm feature is enabled for these tests
+    // The dummy values are fine as mock_llm will intercept the call.
+    agent.set_llm_config(
+        "http://localhost:1234/mock".to_string(),
+        "mock-model".to_string(),
+        "mock-api-key".to_string(),
+    );
+    agent
+}
+
+#[wasm_bindgen_test]
+async fn test_llm_suggested_multi_step_dom_commands_end_to_end() {
+    let agent = setup_agent_for_integration_tests();
+    
+    // This task string is configured in llm.rs (mock) to return a JSON array of commands
+    let task_for_llm = "fill username and password and click login";
+    let tasks_json = serde_json::to_string(&vec![task_for_llm]).unwrap();
+
+    // Clear initial state if any (e.g., from previous tests if page is not reloaded)
+    if let Some(user_input) = get_html_input_element_by_id_for_test("testuser") { user_input.set_value(""); }
+    if let Some(pass_input) = get_html_input_element_by_id_for_test("testpass") { pass_input.set_value(""); }
+    if let Some(status_div) = get_html_element_by_id_for_test("loginStatus") { status_div.set_text_content(Some("Not logged in")); }
+
+
+    let result_js = agent.automate(tasks_json).await.expect("Automate call failed");
+    let result_str = result_js.as_string().expect("Result should be a string");
+    let results_outer: Vec<Result<String, String>> = serde_json::from_str(&result_str)
+        .expect("Failed to parse outer JSON array of results");
+
+    assert_eq!(results_outer.len(), 1, "Expected one overall task result");
+    let llm_commands_execution_result_str = results_outer[0].as_ref().expect("Task execution failed");
+
+    // The result from agent.rs run_task for LLM-generated JSON commands is a JSON string of Vec<Result<String, String>>
+    let inner_results: Vec<Result<String, String>> = serde_json::from_str(llm_commands_execution_result_str)
+        .expect("Failed to parse inner JSON array of command results");
+    
+    assert_eq!(inner_results.len(), 3, "Expected three DOM command results");
+
+    assert!(inner_results[0].is_ok(), "First command (TYPE username) should be Ok");
+    assert_eq!(inner_results[0].as_ref().unwrap(), "Successfully typed 'testuser' in element with selector: 'css:#testuser'");
+    
+    assert!(inner_results[1].is_ok(), "Second command (TYPE password) should be Ok");
+    assert_eq!(inner_results[1].as_ref().unwrap(), "Successfully typed 'testpass' in element with selector: 'css:#testpass'");
+
+    assert!(inner_results[2].is_ok(), "Third command (CLICK login) should be Ok");
+    assert_eq!(inner_results[2].as_ref().unwrap(), "Successfully clicked element with selector: 'css:#testloginbtn'");
+
+    // Verify DOM state after commands
+    assert_eq!(get_element_value("css:#testuser").unwrap(), "testuser", "Username input value check");
+    assert_eq!(get_element_value("css:#testpass").unwrap(), "testpass", "Password input value check");
+    assert_eq!(get_element_text("css:#loginStatus").unwrap(), "Login Successful!", "Login status check");
+}
+
+
+#[wasm_bindgen_test]
+async fn test_sequential_tasks_with_previous_result_placeholder_end_to_end() {
+    let agent = setup_agent_for_integration_tests();
+
+    // Clear initial state
+    if let Some(input_field) = get_html_input_element_by_id_for_test("inputfield") { input_field.set_value(""); }
+
+    let tasks = vec![
+        "READ css:#dataelement", // This will be handled by parse_dom_command, not LLM
+        "TYPE css:#inputfield {{PREVIOUS_RESULT}}" // Also handled by parse_dom_command
+    ];
+    let tasks_json = serde_json::to_string(&tasks).unwrap();
+
+    let result_js = agent.automate(tasks_json).await.expect("Automate call failed");
+    let result_str = result_js.as_string().expect("Result should be a string");
+    let results: Vec<Result<String, String>> = serde_json::from_str(&result_str)
+        .expect("Failed to parse JSON array of results");
+
+    assert_eq!(results.len(), 2, "Expected two task results");
+
+    // Task 1: READ css:#dataelement
+    // Agent 3 (Generic) should be selected by agent.rs agent selection logic
+    // if parse_dom_command is used. The result string format includes the agent info.
+    assert!(results[0].is_ok(), "First task (READ) should be Ok. Got: {:?}", results[0].as_ref().err());
+    let expected_read_output = "Agent 3 (Generic): Text from element 'css:#dataelement': Expected Text for Placeholder Test";
+    assert_eq!(results[0].as_ref().unwrap(), expected_read_output, "READ command output mismatch");
+    
+    // Task 2: TYPE css:#inputfield {{PREVIOUS_RESULT}}
+    // The {{PREVIOUS_RESULT}} should be the string from results[0].as_ref().unwrap().
+    // However, the placeholder logic in lib.rs uses the direct output of run_task.
+    // For a direct DOM command like READ, run_task returns "Agent X: Text from element..."
+    // So, the TYPE command will try to type this entire string.
+    let expected_typed_text = expected_read_output; // This is what will be typed due to current placeholder logic
+
+    assert!(results[1].is_ok(), "Second task (TYPE) should be Ok. Got: {:?}", results[1].as_ref().err());
+    let expected_type_output = format!("Agent 3 (Generic): Successfully typed '{}' in element with selector: 'css:#inputfield'", expected_typed_text);
+    assert_eq!(results[1].as_ref().unwrap(), expected_type_output, "TYPE command output mismatch");
+    
+    // Verify DOM state after commands
+    assert_eq!(get_element_value("css:#inputfield").unwrap(), expected_typed_text, "Input field value check after TYPE with placeholder");
+}

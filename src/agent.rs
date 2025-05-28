@@ -1,6 +1,7 @@
 use crate::llm::call_llm_async; // Changed from call_llm
 use crate::dom_utils::{self, *}; // Import DOM utility functions, ensure dom_utils is accessible
 use web_sys::console; // For logging unexpected parsing issues
+use serde::Deserialize; // For JSON deserialization
 
 // 1. Define AgentRole Enum
 #[derive(Debug, Clone, PartialEq)]
@@ -17,7 +18,8 @@ pub struct Agent {
 }
 
 // Define DomCommandAction enum and DomCommand struct
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize)] // Added Deserialize
+#[serde(rename_all = "UPPERCASE")] // To match action strings like "CLICK"
 enum DomCommandAction {
     Click,
     Type,
@@ -29,12 +31,21 @@ enum DomCommandAction {
     GetAllAttributes, // Added new action
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone)] // DomCommand remains for internal use
 struct DomCommand {
     action: DomCommandAction,
     selector: String,
     value: Option<String>, // For TYPE, SETATTRIBUTE, SELECTOPTION
     attribute_name: Option<String>, // For GETATTRIBUTE, SETATTRIBUTE
+}
+
+// Struct for deserializing LLM's JSON command
+#[derive(Deserialize, Debug)]
+struct LlmDomCommandRequest {
+    action: String, // Keep as String for flexibility, then map to DomCommandAction
+    selector: String,
+    value: Option<String>,
+    attribute_name: Option<String>,
 }
 
 // Implement parse_dom_command function
@@ -51,25 +62,50 @@ const AVAILABLE_DOM_COMMANDS: [&str; 8] = [ // This could be Vec<String> or othe
 
 // Helper function to generate the structured LLM prompt
 fn generate_structured_llm_prompt(
-    agent_id: u32, 
-    agent_role: &AgentRole, 
-    original_task: &str, 
-    available_commands_list: &[&str] // Changed to slice of string slices
+    agent_id: u32,
+    agent_role: &AgentRole,
+    original_task: &str,
+    _available_commands_list: &[&str] // Parameter kept for signature compatibility, but not used directly in new prompt
 ) -> String {
-    let mut command_list_str = String::new();
-    for cmd_desc in available_commands_list.iter() {
-        command_list_str.push_str(&format!("- {}\n", cmd_desc));
-    }
+    // Define the available actions from DomCommandAction enum
+    let actions = [
+        "CLICK",
+        "TYPE",
+        "READ",
+        "GETVALUE",
+        "GETATTRIBUTE",
+        "SETATTRIBUTE",
+        "SELECTOPTION",
+        "GET_ALL_ATTRIBUTES",
+    ];
+    let action_list_str = actions.join(", ");
 
     format!(
         "You are Agent {} ({:?}).\n\
         The user wants to perform the following task: \"{}\"\n\n\
-        Consider if this task can be achieved using one of the following predefined DOM commands:\n\
-        {}\n\
-        If the task directly maps to one of these commands, future versions will allow you to respond with the command in a structured format.\n\
-        For now, please provide a comprehensive natural language response or attempt to perform the action based on your understanding of the task.\n\
-        If the task is a question or does not map to a DOM action, answer it directly.",
-        agent_id, agent_role, original_task, command_list_str
+        Analyze the task. If it can be broken down into a sequence of specific DOM actions, \
+        respond with a JSON array of command objects. Each object must have an \"action\" and a \"selector\". \
+        The \"value\" field is required for TYPE, SETATTRIBUTE, and SELECTOPTION actions. \
+        The \"attribute_name\" field is required for GETATTRIBUTE and SETATTRIBUTE actions, and for GET_ALL_ATTRIBUTES. \
+        Ensure selectors are valid CSS selectors (e.g., \"css:#elementId\", \"css:.className\") or XPath expressions (e.g., \"xpath://div[@id='example']\").\n\n\
+        Available actions are: {}.\n\n\
+        JSON schema for commands:\n\
+        - Click: {{\"action\": \"CLICK\", \"selector\": \"<selector>\"}}\n\
+        - Type: {{\"action\": \"TYPE\", \"selector\": \"<selector>\", \"value\": \"<text_to_type>\"}}\n\
+        - Read: {{\"action\": \"READ\", \"selector\": \"<selector>\"}} (gets text content)\n\
+        - Get Value: {{\"action\": \"GETVALUE\", \"selector\": \"<selector>\"}} (gets value of form elements like input, textarea, select)\n\
+        - Get Attribute: {{\"action\": \"GETATTRIBUTE\", \"selector\": \"<selector>\", \"attribute_name\": \"<attr_name>\"}}\n\
+        - Set Attribute: {{\"action\": \"SETATTRIBUTE\", \"selector\": \"<selector>\", \"attribute_name\": \"<attr_name>\", \"value\": \"<attr_value>\"}}\n\
+        - Select Option: {{\"action\": \"SELECTOPTION\", \"selector\": \"<selector>\", \"value\": \"<option_value>\"}}\n\
+        - Get All Attributes: {{\"action\": \"GET_ALL_ATTRIBUTES\", \"selector\": \"<selector>\", \"attribute_name\": \"<attr_name>\"}} (returns a JSON array of attribute values for all matching elements)\n\n\
+        Example of a JSON array response:\n\
+        [\n\
+          {{\"action\": \"TYPE\", \"selector\": \"css:#username\", \"value\": \"testuser\"}},\n\
+          {{\"action\": \"CLICK\", \"selector\": \"xpath://button[@type='submit']\"}}\n\
+        ]\n\n\
+        If the task is a general question, a request for information not obtainable through DOM actions (e.g., current URL, page title if not in DOM, or a summary), \
+        or if it cannot be mapped to the defined DOM commands, respond with a natural language text answer. Do not attempt to create new DOM command structures not listed.",
+        agent_id, agent_role, original_task, action_list_str
     )
 }
 
@@ -278,7 +314,140 @@ impl AgentSystem {
             );
             
             match call_llm_async(prompt_for_llm, api_key.to_string(), api_url.to_string(), model_name.to_string()).await {
-                Ok(llm_response) => Ok(format!("Agent {} ({:?}) completed task via LLM: {}", selected_agent.id, selected_agent.role, llm_response)),
+                Ok(llm_response) => {
+                    // Attempt to parse the llm_response as a JSON array of LlmDomCommandRequest
+                    match serde_json::from_str::<Vec<LlmDomCommandRequest>>(&llm_response) {
+                        Ok(llm_commands) => {
+                            let mut results = Vec::new();
+                            if llm_commands.is_empty() {
+                                // If LLM returns empty array, treat as natural language response or a specific non-action.
+                                console::log_1(&format!("Agent {} ({:?}): LLM returned an empty command array. Treating as natural language response: {}", selected_agent.id, selected_agent.role, llm_response).into());
+                                return Ok(format!("Agent {} ({:?}) completed task via LLM: {}", selected_agent.id, selected_agent.role, llm_response));
+                            }
+
+                            console::log_1(&format!("Agent {} ({:?}): LLM returned {} commands. Executing...", selected_agent.id, selected_agent.role, llm_commands.len()).into());
+
+                            for llm_cmd_req in llm_commands {
+                                // Validate and convert LlmDomCommandRequest to DomCommand
+                                let action_upper = llm_cmd_req.action.to_uppercase();
+                                let dom_action = match action_upper.as_str() {
+                                    "CLICK" => DomCommandAction::Click,
+                                    "TYPE" => DomCommandAction::Type,
+                                    "READ" => DomCommandAction::Read,
+                                    "GETVALUE" => DomCommandAction::GetValue,
+                                    "GETATTRIBUTE" => DomCommandAction::GetAttribute,
+                                    "SETATTRIBUTE" => DomCommandAction::SetAttribute,
+                                    "SELECTOPTION" => DomCommandAction::SelectOption,
+                                    "GET_ALL_ATTRIBUTES" => DomCommandAction::GetAllAttributes,
+                                    _ => {
+                                        let err_msg = format!("Invalid action '{}' from LLM.", llm_cmd_req.action);
+                                        console::log_1(&err_msg.clone().into());
+                                        results.push(Err(err_msg));
+                                        continue; // Skip this invalid command
+                                    }
+                                };
+
+                                // Validate required fields based on action
+                                match dom_action {
+                                    DomCommandAction::Type | DomCommandAction::SetAttribute | DomCommandAction::SelectOption => {
+                                        if llm_cmd_req.value.is_none() {
+                                            let err_msg = format!("Action {:?} requires 'value'. Command: {:?}", dom_action, llm_cmd_req);
+                                            console::log_1(&err_msg.clone().into());
+                                            results.push(Err(err_msg));
+                                            continue;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                match dom_action {
+                                    DomCommandAction::GetAttribute | DomCommandAction::SetAttribute | DomCommandAction::GetAllAttributes => {
+                                        if llm_cmd_req.attribute_name.is_none() {
+                                            let err_msg = format!("Action {:?} requires 'attribute_name'. Command: {:?}", dom_action, llm_cmd_req);
+                                            console::log_1(&err_msg.clone().into());
+                                            results.push(Err(err_msg));
+                                            continue;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+
+
+                                let dom_command = DomCommand {
+                                    action: dom_action,
+                                    selector: llm_cmd_req.selector,
+                                    value: llm_cmd_req.value,
+                                    attribute_name: llm_cmd_req.attribute_name,
+                                };
+
+                                // Execute the dom_command
+                                let cmd_result = match &dom_command.action {
+                                    DomCommandAction::Click => match click_element(&dom_command.selector) {
+                                        Ok(_) => Ok(format!("Successfully clicked element with selector: '{}'", dom_command.selector)),
+                                        Err(e) => Err(format!("Error clicking element: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                    },
+                                    DomCommandAction::Type => {
+                                        let text_to_type = dom_command.value.as_deref().unwrap_or_default();
+                                        match type_in_element(&dom_command.selector, text_to_type) {
+                                            Ok(_) => Ok(format!("Successfully typed '{}' in element with selector: '{}'", text_to_type, dom_command.selector)),
+                                            Err(e) => Err(format!("Error typing in element: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                        }
+                                    }
+                                    DomCommandAction::Read => match get_element_text(&dom_command.selector) {
+                                        Ok(text) => Ok(format!("Text from element '{}': {}", dom_command.selector, text)),
+                                        Err(e) => Err(format!("Error reading text from element: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                    },
+                                    DomCommandAction::GetValue => match get_element_value(&dom_command.selector) {
+                                        Ok(value) => Ok(format!("Value from element '{}': {}", dom_command.selector, value)),
+                                        Err(e) => Err(format!("Error getting value from element: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                    },
+                                    DomCommandAction::GetAttribute => {
+                                        let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
+                                        match get_element_attribute(&dom_command.selector, attribute_name) {
+                                            Ok(value) => Ok(format!("Attribute '{}' from element '{}': {}", attribute_name, dom_command.selector, value)),
+                                            Err(e) => Err(format!("Error getting attribute: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                        }
+                                    }
+                                    DomCommandAction::SetAttribute => {
+                                        let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
+                                        let attribute_value = dom_command.value.as_deref().unwrap_or_default();
+                                        match set_element_attribute(&dom_command.selector, attribute_name, attribute_value) {
+                                            Ok(_) => Ok(format!("Successfully set attribute '{}' to '{}' for element '{}'", attribute_name, attribute_value, dom_command.selector)),
+                                            Err(e) => Err(format!("Error setting attribute: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                        }
+                                    }
+                                    DomCommandAction::SelectOption => {
+                                        let value = dom_command.value.as_deref().unwrap_or_default();
+                                        match select_dropdown_option(&dom_command.selector, value) {
+                                            Ok(_) => Ok(format!("Successfully selected option '{}' for dropdown '{}'", value, dom_command.selector)),
+                                            Err(e) => Err(format!("Error selecting option: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                        }
+                                    }
+                                    DomCommandAction::GetAllAttributes => {
+                                        let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
+                                        match dom_utils::get_all_elements_attributes(&dom_command.selector, attribute_name) {
+                                            Ok(json_string) => Ok(format!("Successfully retrieved attributes '{}' for elements matching selector '{}': {}", attribute_name, dom_command.selector, json_string)),
+                                            Err(e) => Err(format!("Error getting all attributes: {:?}", e.as_string().unwrap_or_else(|| "Unknown error".to_string()))),
+                                        }
+                                    }
+                                };
+                                results.push(cmd_result);
+                            }
+                            // Serialize the results vector into a JSON string
+                            match serde_json::to_string(&results) {
+                                Ok(json_results) => Ok(json_results),
+                                Err(e) => {
+                                    console::log_1(&format!("Error serializing command results: {:?}", e).into());
+                                    Err(format!("Agent {} ({:?}): Error serializing LLM command results: {}", selected_agent.id, selected_agent.role, e.to_string()))
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // JSON parsing failed, treat as plain text response
+                            console::log_1(&format!("Agent {} ({:?}): LLM response was not valid JSON array of commands (Error: {}). Treating as natural language: {}", selected_agent.id, selected_agent.role, e, llm_response).into());
+                            Ok(format!("Agent {} ({:?}) completed task via LLM: {}", selected_agent.id, selected_agent.role, llm_response))
+                        }
+                    }
+                }
                 Err(js_err) => Err(format!("Agent {} ({:?}): LLM Error: {}", selected_agent.id, selected_agent.role, js_err.as_string().unwrap_or_else(|| "Unknown LLM error".to_string()))),
             }
         }
@@ -498,5 +667,148 @@ mod tests {
         {
             assert!(result_fail.is_err(), "LLM call should also fail without mock (network or parsing). Got: {:?}", result_fail);
         }
+    }
+
+    // New tests for LLM JSON response handling (ensure 'mock-llm' feature is active for these)
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_json_single_valid_command() {
+        let agent_system = AgentSystem::new();
+        let task = "click the submit button"; // Triggers mock: [{"action": "CLICK", "selector": "css:#submitBtn"}]
+        // This task is generic, so Agent 3 (Generic) should be selected.
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        let result_str = result.unwrap();
+        // Expected: JSON array of results. DOM command will fail as no element exists.
+        let expected_inner_json = r#"[{"error":"Error clicking element: \"JsValue(TypeError: Document.querySelector: '#submitBtn' is not a valid selector)\""}]"#; // Exact error message may vary slightly based on browser/wasm-env
+        
+        // We need to check if the result_str contains the core parts of the expected message,
+        // as the exact JsValue error string can be tricky.
+        assert!(result_str.contains("Error clicking element"), "Result string does not contain 'Error clicking element': {}", result_str);
+        assert!(result_str.contains("#submitBtn"), "Result string does not contain selector '#submitBtn': {}", result_str);
+        assert!(result_str.starts_with("[") && result_str.ends_with("]"), "Result string is not a JSON array: {}", result_str);
+
+        // To make it more robust, let's parse the outer and inner JSON if possible
+        match serde_json::from_str::<Vec<Result<String, String>>>(&result_str) {
+            Ok(outer_array) => {
+                assert_eq!(outer_array.len(), 1, "Expected one result in the outer array");
+                assert!(outer_array[0].is_err(), "Expected inner result to be an error");
+                let inner_error_msg = outer_array[0].as_ref().err().unwrap();
+                assert!(inner_error_msg.contains("Error clicking element:"), "Inner error message mismatch: {}", inner_error_msg);
+                assert!(inner_error_msg.contains("#submitBtn"), "Inner error message should contain selector: {}", inner_error_msg);
+            }
+            Err(e) => panic!("Failed to parse result_str as JSON array of results: {}, content: {}", e, result_str),
+        }
+    }
+
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_json_multiple_valid_commands() {
+        let agent_system = AgentSystem::new();
+        let task = "login with testuser and click login"; // Triggers mock: [{"action": "TYPE", "selector": "css:#username", "value": "testuser"}, {"action": "CLICK", "selector": "css:#loginBtn"}]
+        // This task contains "type", so Agent 2 (FormFiller) should be selected.
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        let result_str = result.unwrap();
+        
+        match serde_json::from_str::<Vec<Result<String, String>>>(&result_str) {
+            Ok(results) => {
+                assert_eq!(results.len(), 2, "Expected two results in the JSON array");
+                // First command: TYPE
+                assert!(results[0].is_err(), "Expected first command (TYPE) to result in an error (element not found)");
+                let err_msg1 = results[0].as_ref().err().unwrap();
+                assert!(err_msg1.contains("Error typing in element:"), "Error message for TYPE incorrect: {}", err_msg1);
+                assert!(err_msg1.contains("css:#username"), "Error message for TYPE should contain selector: {}", err_msg1);
+
+                // Second command: CLICK
+                assert!(results[1].is_err(), "Expected second command (CLICK) to result in an error (element not found)");
+                 let err_msg2 = results[1].as_ref().err().unwrap();
+                assert!(err_msg2.contains("Error clicking element:"), "Error message for CLICK incorrect: {}", err_msg2);
+                assert!(err_msg2.contains("css:#loginBtn"), "Error message for CLICK should contain selector: {}", err_msg2);
+            }
+            Err(e) => panic!("Failed to parse result_str as JSON array of results: {}, content: {}", e, result_str),
+        }
+    }
+
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_invalid_json_string() {
+        let agent_system = AgentSystem::new();
+        let task = "task expected to return invalid json"; // Triggers mock: "This is not JSON."
+        // Generic task, Agent 3
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        let expected_response = "Agent 3 (Generic) completed task via LLM: This is not JSON.";
+        assert_eq!(result.unwrap(), expected_response);
+    }
+
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_json_object_not_array() {
+        let agent_system = AgentSystem::new();
+        let task = "task expected to return json object not array"; // Triggers mock: {"message": "This is a JSON object, not an array."}
+        // Generic task, Agent 3
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        let expected_response = "Agent 3 (Generic) completed task via LLM: {\"message\": \"This is a JSON object, not an array.\"}";
+        assert_eq!(result.unwrap(), expected_response);
+    }
+
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_json_array_not_commands() {
+        let agent_system = AgentSystem::new();
+        let task = "task expected to return json array of non-commands"; // Triggers mock: [{"foo": "bar"}]
+        // Generic task, Agent 3
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        // This case should fall back to plain text because the inner objects don't match LlmDomCommandRequest
+        let expected_response = "Agent 3 (Generic) completed task via LLM: [{\"foo\": \"bar\"}]";
+        assert_eq!(result.unwrap(), expected_response);
+    }
+
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_json_array_mixed_valid_invalid_commands() {
+        let agent_system = AgentSystem::new();
+        // Triggers mock: [{"action": "CLICK", "selector": "css:#ok"}, {"action": "INVALID_ACTION", "selector": "css:#bad"}, {"action": "TYPE", "selector": "css:#missingValue"}]
+        let task = "task with mixed valid and invalid commands"; 
+        // Generic task, Agent 3
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        let result_str = result.unwrap();
+
+        match serde_json::from_str::<Vec<Result<String, String>>>(&result_str) {
+            Ok(results) => {
+                assert_eq!(results.len(), 3, "Expected three results in the JSON array");
+
+                // 1. Valid CLICK (will fail due to missing element, which is fine)
+                assert!(results[0].is_err(), "Expected first command (CLICK) to result in an error");
+                assert!(results[0].as_ref().err().unwrap().contains("Error clicking element:"));
+                assert!(results[0].as_ref().err().unwrap().contains("css:#ok"));
+                
+                // 2. Invalid action "INVALID_ACTION"
+                assert!(results[1].is_err(), "Expected second command (INVALID_ACTION) to be an error");
+                assert_eq!(results[1].as_ref().err().unwrap(), "Invalid action 'INVALID_ACTION' from LLM.");
+                
+                // 3. Valid action "TYPE" but missing "value"
+                assert!(results[2].is_err(), "Expected third command (TYPE missing value) to be an error");
+                assert!(results[2].as_ref().err().unwrap().contains("Action Type requires 'value'. Command: LlmDomCommandRequest { action: \"TYPE\", selector: \"css:#missingValue\", value: None, attribute_name: None }"));
+            }
+            Err(e) => panic!("Failed to parse result_str as JSON array of results: {}, content: {}", e, result_str),
+        }
+    }
+
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_json_empty_array() {
+        let agent_system = AgentSystem::new();
+        let task = "task expected to return empty command array"; // Triggers mock: []
+        // Generic task, Agent 3
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        // If LLM returns empty array, it's treated as a natural language response of "[]"
+        let expected_response = "Agent 3 (Generic) completed task via LLM: []";
+        assert_eq!(result.unwrap(), expected_response);
     }
 }

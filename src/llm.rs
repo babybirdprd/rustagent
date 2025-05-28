@@ -72,63 +72,102 @@ pub async fn call_llm_async(prompt: String, api_key: String, api_url: String, mo
 #[cfg(feature = "mock-llm")]
 #[wasm_bindgen]
 pub async fn call_llm_async(prompt: String, _api_key: String, _api_url: String, _model_name: String) -> Result<String, JsValue> {
-    console::log_1(&format!("call_llm_async called (MOCK) for prompt:\n{}", prompt).into());
+    console::log_1(&format!("call_llm_async called (MOCK) for prompt containing task:\n\"{}\"", extract_task_from_prompt(&prompt)).into());
 
-    // Define task descriptions for clarity in matching
-    let task_nav_example = "navigate to example.com";
-    let task_fill_form = "fill the login form with my details";
-    let task_summarize_doc = "summarize this document for me";
-    let task_fail_llm = "this task should fail_llm_call please";
-    let task_nav_click_xpath = "navigate then CLICK xpath://button[@id='specificButtonXpath']";
-    let task_nav_click_direct = "navigate then CLICK #myButtonDirect";
-
-    // Constructing expected prompt substrings based on the new structured format
-    let nav_prompt_substring = format!("You are Agent 1 (Navigator).\n\
-                The user wants to perform the following task: \"{}\"", task_nav_example);
-    let form_prompt_substring = format!("You are Agent 2 (FormFiller).\n\
-                The user wants to perform the following task: \"{}\"", task_fill_form);
-    let generic_summary_prompt_substring = format!("You are Agent 3 (Generic).\n\
-                The user wants to perform the following task: \"{}\"", task_summarize_doc);
-    let generic_fail_prompt_substring = format!("You are Agent 3 (Generic).\n\
-                The user wants to perform the following task: \"{}\"", task_fail_llm);
-    let nav_click_xpath_prompt_substring = format!("You are Agent 1 (Navigator).\n\
-                The user wants to perform the following task: \"{}\"", task_nav_click_xpath);
-    let nav_click_direct_prompt_substring = format!("You are Agent 1 (Navigator).\n\
-                The user wants to perform the following task: \"{}\"", task_nav_click_direct);
-
-    if prompt.contains(&generic_fail_prompt_substring) {
-        Err(JsValue::from_str("Mocked LLM Error: LLM call failed as requested by prompt."))
-    } else if prompt.contains(&nav_prompt_substring) {
-        Ok(format!("Mocked LLM response for '{}'", task_nav_example))
-    } else if prompt.contains(&form_prompt_substring) {
-        Ok(format!("Mocked LLM response for '{}'", task_fill_form))
-    } else if prompt.contains(&generic_summary_prompt_substring) {
-        Ok(format!("Mocked LLM response for '{}'", task_summarize_doc))
-    } else if prompt.contains(&nav_click_xpath_prompt_substring) {
-        Ok(format!("Mocked LLM response for '{}'", task_nav_click_xpath))
-    } else if prompt.contains(&nav_click_direct_prompt_substring) {
-        Ok(format!("Mocked LLM response for '{}'", task_nav_click_direct))
+    // --- New prompts for JSON command responses ---
+    if prompt.contains("click the submit button") {
+        return Ok("[{\"action\": \"CLICK\", \"selector\": \"css:#submitBtn\"}]".to_string());
+    } else if prompt.contains("login with testuser and click login") {
+        return Ok("[{\"action\": \"TYPE\", \"selector\": \"css:#username\", \"value\": \"testuser\"}, {\"action\": \"CLICK\", \"selector\": \"css:#loginBtn\"}]".to_string());
+    } else if prompt.contains("get logo src") { // For GETATTRIBUTE
+        return Ok("[{\"action\": \"GETATTRIBUTE\", \"selector\": \"css:img#logo\", \"attribute_name\": \"src\"}]".to_string());
+    } else if prompt.contains("set alt text for myImage") { // For SETATTRIBUTE
+        return Ok("[{\"action\": \"SETATTRIBUTE\", \"selector\": \"id=myImage\", \"attribute_name\": \"alt\", \"value\": \"New alt text\"}]".to_string());
+    } else if prompt.contains("task expected to return invalid json") {
+        return Ok("This is not JSON.".to_string());
+    } else if prompt.contains("task expected to return json object not array") {
+        return Ok("{\"message\": \"This is a JSON object, not an array.\"}".to_string());
+    } else if prompt.contains("task expected to return json array of non-commands") {
+        return Ok("[{\"foo\": \"bar\"}]".to_string());
+    } else if prompt.contains("task expected to return empty command array") {
+        return Ok("[]".to_string());
+    } else if prompt.contains("task with mixed valid and invalid commands") {
+        return Ok("[{\"action\": \"CLICK\", \"selector\": \"css:#ok\"}, {\"action\": \"INVALID_ACTION\", \"selector\": \"css:#bad\"}, {\"action\": \"TYPE\", \"selector\": \"css:#missingValue\"}]".to_string());
     }
-    // Fallback for prompts not matching specific test cases but are structured
+    // --- New Mocks for automate tests ---
+    else if prompt.contains("get text from #element") { // For Scenario 2 (first task)
+        // This task is specific enough that parse_dom_command might not pick it up, so LLM is called.
+        // We want this to return a simple string that can be used by the next task.
+        return Ok("Text from #element".to_string());
+    }
+    else if prompt.contains("TYPE css:#input Text from #element") { // For Scenario 2 (second task, after substitution)
+        // LLM is asked to perform "TYPE css:#input Text from #element"
+        // It should respond with a JSON command for the agent to execute.
+        return Ok("[{\"action\": \"TYPE\", \"selector\": \"css:#input\", \"value\": \"Text from #element\"}]".to_string());
+    }
+    else if prompt.contains("TYPE css:#input ") && prompt.ends_with("{{PREVIOUS_RESULT}}") { // Scenario 3 (second task, placeholder becomes empty)
+         // This case handles when {{PREVIOUS_RESULT}} was empty.
+         // The prompt to LLM would be "TYPE css:#input " (with a trailing space if not trimmed)
+        return Ok("[{\"action\": \"TYPE\", \"selector\": \"css:#input\", \"value\": \"\"}]".to_string());
+    }
+    else if prompt.contains("click #first_button") { // For Scenario 5 (Task A)
+        return Ok("Clicked #first_button".to_string()); // Simple string output
+    }
+    else if prompt.contains("process Clicked #first_button for task B") { // For Scenario 5 (Task B, after substitution)
+        return Ok("Processed Clicked #first_button".to_string()); // Simple string output
+    }
+    else if prompt.contains("process Processed Clicked #first_button for task C") { // For Scenario 5 (Task C, after substitution)
+        return Ok("Final result from C".to_string());
+    }
+    else if prompt.contains("get simple id") { // For Scenario 6 (Task A)
+        return Ok("element_id_123".to_string()); // Simple string output
+    }
+    else if prompt.contains("LLM_ACTION_EXPECTING_JSON_CMDS element_id_123") { // For Scenario 6 (Task B, after substitution)
+        return Ok("[{\"action\": \"CLICK\", \"selector\": \"#element_id_123\"}, {\"action\": \"READ\", \"selector\": \"#another_element\"}]".to_string());
+    }
+    // --- New Mocks for integration_test.rs ---
+    else if prompt.contains("fill username and password and click login") { // For integration test 1
+        return Ok("[{\"action\": \"TYPE\", \"selector\": \"css:#testuser\", \"value\": \"testuser\"}, {\"action\": \"TYPE\", \"selector\": \"css:#testpass\", \"value\": \"testpass\"}, {\"action\": \"CLICK\", \"selector\": \"css:#testloginbtn\"}]".to_string());
+    }
+    // --- Maintain existing/updated behaviors ---
+    else if prompt.contains("this task should fail_llm_call please") {
+        return Err(JsValue::from_str("Mocked LLM Error: LLM call failed as requested by prompt."));
+    } else if prompt.contains("navigate to example.com") {
+        // Kept as plain text for now to test this fallback path
+        return Ok("Mocked LLM response for 'navigate to example.com'".to_string());
+    } else if prompt.contains("fill the login form with my details") {
+        // Kept as plain text due to generic nature of prompt
+        return Ok("Mocked LLM response for 'fill the login form with my details'".to_string());
+    } else if prompt.contains("summarize this document for me") {
+        return Ok("Mocked LLM response for 'summarize this document for me'".to_string());
+    } else if prompt.contains("navigate then CLICK xpath://button[@id='specificButtonXpath']") {
+         return Ok("Mocked LLM response for 'navigate then CLICK xpath://button[@id='specificButtonXpath']'".to_string());
+    } else if prompt.contains("navigate then CLICK #myButtonDirect") {
+        return Ok("Mocked LLM response for 'navigate then CLICK #myButtonDirect'".to_string());
+    }
+    // Fallback for other structured prompts not matching specific test cases
     else if prompt.contains("The user wants to perform the following task:") {
-        // Extract the original task for a more dynamic generic response
-        let task_marker = "The user wants to perform the following task: \"";
-        if let Some(start_index) = prompt.find(task_marker) {
-            let actual_task_start = start_index + task_marker.len();
-            if let Some(end_index) = prompt[actual_task_start..].find("\"") {
-                let task_content = &prompt[actual_task_start .. actual_task_start + end_index];
-                return Ok(format!("Mocked LLM response regarding task: '{}'", task_content));
-            }
-        }
-        // If task extraction fails, return a generic structured response
-        Ok("Generic Mocked LLM response for a structured prompt.".to_string())
+        let task_content = extract_task_from_prompt(&prompt);
+        return Ok(format!("Mocked LLM response regarding task: '{}'", task_content));
     }
-    // Legacy fallback for any old-style prompts if they still exist in some tests
+    // Legacy fallback
     else if prompt.contains("error_test_prompt") {
-        Ok("Mocked LLM response: This prompt triggers a success for error testing.".to_string())
+        return Ok("Mocked LLM response: This prompt triggers a success for error testing.".to_string());
     }
+    // Default fallback
     else {
-         // This is a true fallback if none of the above conditions are met.
-        Ok(format!("Default Mocked LLM response for unhandled prompt structure: {}", prompt))
+        return Ok(format!("Default Mocked LLM response for unhandled prompt structure: {}", prompt));
     }
+}
+
+// Helper function to extract task from the full prompt for logging or generic responses
+fn extract_task_from_prompt(prompt_str: &str) -> String {
+    let task_marker = "The user wants to perform the following task: \"";
+    if let Some(start_index) = prompt_str.find(task_marker) {
+        let actual_task_start = start_index + task_marker.len();
+        if let Some(end_index) = prompt_str[actual_task_start..].find("\"") {
+            return prompt_str[actual_task_start .. actual_task_start + end_index].to_string();
+        }
+    }
+    "Unknown or malformed task".to_string()
 }
