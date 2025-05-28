@@ -1,108 +1,262 @@
-use wasm_bindgen_test::*;
-use rustagent::RustAgent; // Assuming 'rustagent' is the library crate name
-use web_sys;
+// tests/integration_test.rs
 
-// Configure wasm-bindgen-test to run in a browser environment
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_test::*;
+use web_sys::{Element, HtmlElement, HtmlInputElement, HtmlSelectElement, Document};
+
+// Assuming your crate is named `rustagent` and dom_utils are public functions in `src/dom_utils.rs`
+// and exposed via `pub mod dom_utils;` in `src/lib.rs` or directly `pub use crate::dom_utils::*;`
+// This means the functions are available under `rustagent::dom_utils::*`
+// For the purpose of this integration test, we assume the crate is named `rustagent`.
+// If `dom_utils` is a module within `rustagent`, then `rustagent::dom_utils::function_name`.
+// If functions are directly exported by `lib.rs` (e.g. `pub use crate::dom_utils::click_element;`),
+// then `rustagent::click_element` would be the path.
+// Let's assume they are exposed under the crate root for simplicity here,
+// or that `pub mod dom_utils;` is in `lib.rs` making them `rustagent::dom_utils::*`.
+use rustagent::dom_utils::{
+    click_element, type_in_element, get_element_text, get_element_value,
+    get_element_attribute, set_element_attribute, select_dropdown_option,
+};
+
 wasm_bindgen_test_configure!(run_in_browser);
 
+// Helper to get document
+fn document() -> Document {
+    web_sys::window().unwrap().document().unwrap()
+}
+
+// Helper to get an element for direct checks (not using the utils themselves for this part)
+fn get_html_element_by_id_for_test(id: &str) -> Option<HtmlElement> {
+    document().get_element_by_id(id)?.dyn_into::<HtmlElement>().ok()
+}
+
+fn get_html_input_element_by_id_for_test(id: &str) -> Option<HtmlInputElement> {
+    document().get_element_by_id(id)?.dyn_into::<HtmlInputElement>().ok()
+}
+
+fn get_html_select_element_by_id_for_test(id: &str) -> Option<HtmlSelectElement> {
+    document().get_element_by_id(id)?.dyn_into::<HtmlSelectElement>().ok()
+}
+
+
 #[wasm_bindgen_test]
-async fn test_rust_agent_new() {
-    let _agent = RustAgent::new();
-    // If new() had complex logic or could panic, assertions would go here.
-    // For now, successfully creating an instance is the test.
-    assert!(true, "RustAgent::new() should not panic.");
+async fn test_click_element_success_css() {
+    let result_span = get_html_element_by_id_for_test("clickResult").expect("#clickResult should exist");
+    assert_eq!(result_span.text_content().unwrap_or_default(), "Not Clicked", "Initial text");
+    
+    let click_result = click_element("#testButton");
+    assert!(click_result.is_ok(), "click_element with CSS selector failed: {:?}", click_result.err());
+    
+    assert_eq!(result_span.text_content().unwrap_or_default(), "Button Clicked!", "Text did not change after click");
 }
 
 #[wasm_bindgen_test]
-async fn test_automate_dom_command() {
-    // This test runs in a browser context, so DOM manipulation is possible.
+async fn test_click_element_success_xpath() {
+    let result_span = get_html_element_by_id_for_test("clickResult").expect("#clickResult should exist");
+    result_span.set_text_content(Some("Not Clicked")); // Reset for this test
+    assert_eq!(result_span.text_content().unwrap_or_default(), "Not Clicked", "Initial text for XPath test");
+
+    let click_result = click_element("xpath://button[@id='testButton']");
+    assert!(click_result.is_ok(), "click_element with XPath selector failed: {:?}", click_result.err());
     
-    // 1. Setup: Create a dummy element in the document
-    let window = web_sys::window().expect("should have a window in this context");
-    let document = window.document().expect("window should have a document");
-    let body = document.body().expect("document should have a body");
-
-    let test_element = document.create_element("div").unwrap();
-    test_element.set_id("testDivForRead");
-    test_element.set_inner_html("Test content from WASM test");
-    body.append_child(&test_element).expect("should be able to append test element");
-
-    // Create another element for testing value retrieval (e.g., input)
-    let test_input = document.create_element("input").unwrap();
-    test_input.set_id("testInputForGetValue");
-    let test_input_html_element = test_input.dyn_into::<web_sys::HtmlInputElement>().unwrap();
-    test_input_html_element.set_value("Test input value");
-    body.append_child(&test_input_html_element).expect("should append test input");
-
-    let agent = RustAgent::new();
-    let api_key = "dummy_api_key_for_dom_test";
-
-    // Test READ command
-    let task_read = "READ #testDivForRead";
-    let result_read = agent.automate(task_read, api_key);
-    assert!(
-        result_read.contains("Test content from WASM test"),
-        "Result for READ command should contain 'Test content from WASM test', got: {}",
-        result_read
-    );
-
-    // Test GETVALUE command
-    let task_getvalue = "GETVALUE #testInputForGetValue";
-    let result_getvalue = agent.automate(task_getvalue, api_key);
-    assert!(
-        result_getvalue.contains("Test input value"),
-        "Result for GETVALUE command should contain 'Test input value', got: {}",
-        result_getvalue
-    );
-
-    // Test CLICK command (mocking click is hard, we just check it doesn't panic and selector is used)
-    // We can't easily verify a click happened without more complex JS interop or a visible browser.
-    // We will check if the agent reports trying to click the element.
-    let test_button = document.create_element("button").unwrap();
-    test_button.set_id("testButtonForClick");
-    body.append_child(&test_button).expect("should append test button");
-    
-    let task_click = "CLICK #testButtonForClick";
-    let result_click = agent.automate(task_click, api_key);
-    assert!(
-        result_click.contains("Successfully clicked element with selector: '#testButtonForClick'") || result_click.contains("Error clicking element:"),
-        "Result for CLICK command was not as expected, got: {}",
-        result_click
-    );
-
-
-    // 2. Teardown: Clean up the dummy elements
-    body.remove_child(&test_element).expect("should remove test element");
-    body.remove_child(&test_input_html_element).expect("should remove test input");
-    body.remove_child(&test_button).expect("should remove test button");
+    assert_eq!(result_span.text_content().unwrap_or_default(), "Button Clicked!", "Text did not change after XPath click");
 }
 
 #[wasm_bindgen_test]
-async fn test_automate_llm_call_expects_error() {
-    let agent = RustAgent::new();
-    let task = "summarize this for me please"; // A task that should fall back to LLM
-    let api_key = "invalid_api_key_for_test"; // An obviously invalid API key
-    
-    let result = agent.automate(task, api_key);
+async fn test_click_element_not_found() {
+    let res_css = click_element("#nonExistentButton");
+    assert!(res_css.is_err());
+    assert_eq!(res_css.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for CSS selector '#nonExistentButton'");
 
-    // We expect an error from the LLM call due to the invalid API key or network failure.
-    // The exact error message from reqwest/OpenAI can vary.
-    // We check for substrings that indicate an error related to the LLM call.
-    // The `call_llm` function in Rust formats this as "Error calling LLM: actual_error_from_async_call"
-    let lower_result = result.to_lowercase(); // Case-insensitive check
+    let res_xpath = click_element("xpath://button[@id='nonExistentButtonXPath']");
+    assert!(res_xpath.is_err());
+    assert_eq!(res_xpath.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for XPath selector 'xpath://button[@id='nonExistentButtonXPath']'");
+}
 
-    assert!(
-        lower_result.contains("error calling llm:"), 
-        "Result should indicate an 'Error calling LLM:'. Got: {}",
-        result
-    );
+#[wasm_bindgen_test]
+async fn test_type_in_element_success() {
+    let input_el = get_html_input_element_by_id_for_test("textInput").expect("#textInput should exist");
+    let test_text = "Hello, RustAgent!";
+
+    // Test with CSS
+    input_el.set_value(""); // Clear
+    let type_res_css = type_in_element("#textInput", test_text);
+    assert!(type_res_css.is_ok(), "type_in_element CSS failed: {:?}", type_res_css.err());
+    assert_eq!(get_element_value("#textInput").unwrap(), test_text, "CSS type check");
+
+    // Test with XPath
+    input_el.set_value(""); // Clear
+    let type_res_xpath = type_in_element("xpath://input[@id='textInput']", test_text);
+    assert!(type_res_xpath.is_ok(), "type_in_element XPath failed: {:?}", type_res_xpath.err());
+    assert_eq!(get_element_value("xpath://input[@id='textInput']").unwrap(), test_text, "XPath type check");
+}
+
+#[wasm_bindgen_test]
+async fn test_type_in_element_not_input() {
+    let res = type_in_element("#nonInputDiv", "test"); // #nonInputDiv is a div
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementTypeError: Element for selector '#nonInputDiv' is not an input element.");
+}
+
+#[wasm_bindgen_test]
+async fn test_type_in_element_not_found() {
+    let res = type_in_element("#nonExistentForType", "test");
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for CSS selector '#nonExistentForType'");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_text_success() {
+    assert_eq!(get_element_text("#textDisplay").unwrap(), "Initial Text Content");
+    assert_eq!(get_element_text("xpath://div[@id='textDisplay']").unwrap(), "Initial Text Content");
+    assert_eq!(get_element_text("#emptyTextDisplay").unwrap(), "");
+    assert_eq!(get_element_text("xpath://div[@data-xpath-target='true']").unwrap(), "XPath Target Text");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_text_not_found() {
+    let res = get_element_text("#nonExistentForGetText");
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for CSS selector '#nonExistentForGetText'");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_value_success() {
+    assert_eq!(get_element_value("#valueInput").unwrap(), "Initial Value");
+    assert_eq!(get_element_value("xpath://input[@id='valueInput']").unwrap(), "Initial Value");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_value_not_input() {
+    let res = get_element_value("#textDisplay"); // #textDisplay is a div
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementTypeError: Element for selector '#textDisplay' is not an input element.");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_value_not_found() {
+    let res = get_element_value("#nonExistentForGetValue");
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for CSS selector '#nonExistentForGetValue'");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_attribute_success() {
+    assert_eq!(get_element_attribute("#attributeElement", "data-test").unwrap(), "initial_value");
+    assert_eq!(get_element_attribute("xpath://*[@id='attributeElement']", "data-test").unwrap(), "initial_value");
+    assert_eq!(get_element_attribute("#attributeElement", "class").unwrap(), "test-class");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_attribute_attr_not_found() {
+    let res = get_element_attribute("#attributeElement", "non-existent-attribute");
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "AttributeNotFound: Attribute 'non-existent-attribute' not found on element with selector '#attributeElement'");
+}
+
+#[wasm_bindgen_test]
+async fn test_get_element_attribute_element_not_found() {
+    let res = get_element_attribute("#nonExistentForGetAttr", "data-test");
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for CSS selector '#nonExistentForGetAttr'");
+}
+
+#[wasm_bindgen_test]
+async fn test_set_element_attribute_success() {
+    let attr_name = "data-test";
+    let new_value_css = "new_value_css";
+    let new_value_xpath = "new_value_xpath";
+
+    // Test with CSS
+    let set_res_css = set_element_attribute("#attributeElement", attr_name, new_value_css);
+    assert!(set_res_css.is_ok(), "set_element_attribute CSS failed: {:?}", set_res_css.err());
+    assert_eq!(get_element_attribute("#attributeElement", attr_name).unwrap(), new_value_css);
+
+    // Test with XPath
+    let set_res_xpath = set_element_attribute("xpath://*[@id='attributeElement']", attr_name, new_value_xpath);
+    assert!(set_res_xpath.is_ok(), "set_element_attribute XPath failed: {:?}", set_res_xpath.err());
+    assert_eq!(get_element_attribute("xpath://*[@id='attributeElement']", attr_name).unwrap(), new_value_xpath);
+}
+
+#[wasm_bindgen_test]
+async fn test_set_element_attribute_element_not_found() {
+    let res = set_element_attribute("#nonExistentForSetAttr", "data-test", "value");
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for CSS selector '#nonExistentForSetAttr'");
+}
+
+#[wasm_bindgen_test]
+async fn test_select_dropdown_option_success() {
+    let select_el = get_html_select_element_by_id_for_test("selectElement").expect("#selectElement should exist");
     
-    // Further check for common issues like request error or API error.
-    // `call_llm_async` returns `JsValue::from_str(&format!("Request error: {}", e.to_string()))`
-    // or `JsValue::from_str(&format!("API error: {}", error_text))`
-    assert!(
-        lower_result.contains("request error:") || lower_result.contains("api error:") || lower_result.contains("unknown javascript error"),
-        "Result should contain a more specific error like 'request error:', 'api error:', or 'unknown javascript error'. Got: {}",
-        result
-    );
+    // Initial value check
+    assert_eq!(select_el.value(), "val2", "Initial selected value");
+
+    // Test with CSS
+    let sel_res_css = select_dropdown_option("#selectElement", "val3");
+    assert!(sel_res_css.is_ok(), "select_dropdown_option CSS failed: {:?}", sel_res_css.err());
+    assert_eq!(select_el.value(), "val3", "CSS select check");
+
+    // Test with XPath
+    let sel_res_xpath = select_dropdown_option("xpath://select[@id='selectElement']", "val1");
+    assert!(sel_res_xpath.is_ok(), "select_dropdown_option XPath failed: {:?}", sel_res_xpath.err());
+    assert_eq!(select_el.value(), "val1", "XPath select check");
+}
+
+#[wasm_bindgen_test]
+async fn test_select_dropdown_option_non_existent_value() {
+    let select_el = get_html_select_element_by_id_for_test("selectElement").expect("#selectElement should exist");
+    let initial_val = select_el.value(); // Store current value
+    
+    let res = select_dropdown_option("#selectElement", "nonExistentValue");
+    // Setting a non-existent value on a select element doesn't throw an error in browsers,
+    // it usually results in no change or the first option being selected.
+    // Our function will return Ok if the element is a select, regardless of value existence.
+    assert!(res.is_ok(), "select_dropdown_option with non-existent value should be Ok");
+    
+    // Verify the value hasn't changed (or changed to specific browser default if applicable)
+    // For robustness, we check it's not the value we tried to set, or it's still the initial.
+    let current_val = select_el.value();
+    assert_ne!(current_val, "nonExistentValue");
+    if !current_val.is_empty() { // If an option is selected (e.g. first one by default)
+      assert_eq!(current_val, initial_val, "Value should remain unchanged or be a default if non-existent value was set.");
+    } else {
+      // Some browsers might make value empty if non-existent option is set
+      assert!(current_val.is_empty() || current_val == initial_val, "Value should be empty or initial after trying to set non-existent option.");
+    }
+}
+
+#[wasm_bindgen_test]
+async fn test_select_dropdown_option_not_select() {
+    let res = select_dropdown_option("#nonSelectDiv", "val1"); // #nonSelectDiv is a div
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementTypeError: Element for selector '#nonSelectDiv' is not a select element.");
+}
+
+#[wasm_bindgen_test]
+async fn test_select_dropdown_option_element_not_found() {
+    let res = select_dropdown_option("#nonExistentForSelect", "val1");
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().as_string().unwrap(), "ElementNotFound: No element found for CSS selector '#nonExistentForSelect'");
+}
+
+// Specific XPath test
+#[wasm_bindgen_test]
+async fn test_get_text_xpath_target() {
+    assert_eq!(get_element_text("xpath://div[@data-xpath-target='true']").unwrap(), "XPath Target Text");
+}
+
+// Invalid selector tests
+#[wasm_bindgen_test]
+async fn test_invalid_css_selector_error() {
+    let res = get_element_text("css:[[[invalid");
+    assert!(res.is_err());
+    assert!(res.unwrap_err().as_string().unwrap().starts_with("InvalidSelector: Invalid CSS selector 'css:[[[invalid'. Details:"));
+}
+
+#[wasm_bindgen_test]
+async fn test_invalid_xpath_selector_error() {
+    let res = get_element_text("xpath://[invalid-xpath");
+    assert!(res.is_err());
+    assert!(res.unwrap_err().as_string().unwrap().starts_with("InvalidSelector: Invalid XPath expression 'xpath://[invalid-xpath'. Details:"));
 }

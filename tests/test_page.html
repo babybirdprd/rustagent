@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RustAgent DOM Utils Test Page</title>
+</head>
+<body>
+    <h1>DOM Utilities Test Page</h1>
+
+    <!-- For click_element -->
+    <button id="testButton">Click Me</button>
+    <span id="clickResult">Not Clicked</span>
+
+    <!-- For type_in_element -->
+    <input type="text" id="textInput" placeholder="Type here">
+
+    <!-- For get_element_text -->
+    <div id="textDisplay">Initial Text Content</div>
+    <div id="emptyTextDisplay"></div>
+
+    <!-- For get_element_value -->
+    <input type="text" id="valueInput" value="Initial Value">
+
+    <!-- For get_element_attribute and set_element_attribute -->
+    <div id="attributeElement" data-test="initial_value" class="test-class">Attribute Test Element</div>
+
+    <!-- For select_dropdown_option -->
+    <select id="selectElement">
+        <option value="val1">Option 1</option>
+        <option value="val2" selected>Option 2</option>
+        <option value="val3">Option 3</option>
+    </select>
+
+    <!-- For XPath testing -->
+    <div id="xpathParent">
+        <div data-xpath-target="true" class="xpath-class">XPath Target Text</div>
+        <button id="xpathButton">XPath Button</button>
+    </div>
+    
+    <!-- For testing error conditions -->
+    <div id="nonInputDiv">This is a div, not an input.</div>
+    <div id="nonSelectDiv">This is a div, not a select.</div>
+
+
+    <script>
+        // Script for testButton click interaction
+        const button = document.getElementById('testButton');
+        const resultSpan = document.getElementById('clickResult');
+        if (button && resultSpan) {
+            button.addEventListener('click', () => {
+                resultSpan.textContent = 'Button Clicked!';
+            });
+        }
+    </script>
+</body>
+</html>

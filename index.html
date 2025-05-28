@@ -49,20 +49,27 @@
         <h1>RustAgent Interactive Demo</h1>
 
         <div class="input-group">
-            <label for="taskInput">Task:</label>
-            <input type="text" id="taskInput" placeholder="e.g., CLICK #myButton, or describe a task for LLM">
+            <label for="taskInput">Task(s) (one per line, or a single task; use {{PREVIOUS_RESULT}} for context):</label>
+            <textarea id="taskInput" placeholder="e.g., READ css:h1&#10;TYPE css:#myInput {{PREVIOUS_RESULT}}" rows="3" style="width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-family: inherit;"></textarea>
         </div>
 
+        <h2>LLM Configuration</h2>
+        <div class="input-group">
+            <label for="apiUrlInput">LLM API URL:</label>
+            <input type="text" id="apiUrlInput" value="https://api.openai.com/v1/chat/completions" placeholder="Enter LLM API URL">
+        </div>
+        <div class="input-group">
+            <label for="modelNameInput">LLM Model Name:</label>
+            <input type="text" id="modelNameInput" value="gpt-3.5-turbo" placeholder="Enter LLM Model Name">
+        </div>
         <div class="input-group">
             <label for="apiKeyInput">LLM API Key:</label>
-            <input type="text" id="apiKeyInput" placeholder="Enter your LLM API Key (if task requires LLM)">
+            <input type="password" id="apiKeyInput" placeholder="Enter your LLM API Key">
         </div>
+        <button id="saveConfigButton" style="margin-bottom: 20px; background-color: #28a745;">Save LLM Configuration</button>
+        <div id="configStatus" style="margin-bottom: 20px; text-align: center;"></div>
 
-        <div class="input-group">
-            <label for="urlInput">Target URL (Informational):</label>
-            <input type="text" id="urlInput" placeholder="Enter target URL (currently not used by agent)">
-        </div>
-
+        <h2>Run Tasks</h2>
         <button id="runButton">Run Automation</button>
 
         <h2>Result:</h2>
@@ -87,32 +94,51 @@
             // apiKeyInput.value = "YOUR_API_KEY_HERE";
 
 
-            runButton.addEventListener('click', () => {
-                const task = taskInput.value.trim();
-                const apiKey = apiKeyInput.value.trim();
+            runButton.addEventListener('click', async () => { // Make the event listener async
+                const singleTask = taskInput.value.trim(); // Keep reading from the single input for now
+                const apiKey = apiKeyInput.value.trim(); 
+                const apiUrl = document.getElementById('apiUrlInput').value.trim(); 
+                const modelName = document.getElementById('modelNameInput').value.trim();
 
-                if (!task) {
+                if (!singleTask) {
                     resultArea.textContent = "Error: Please enter a task.";
                     return;
                 }
                 
                 // Indicate processing
-                resultArea.textContent = "Processing task...";
-                console.log(`Task: "${task}", API Key: "${apiKey ? 'Provided' : 'Not Provided'}"`);
+                resultArea.textContent = "Processing task(s)...";
+                
+                // Wrap the single task into a JSON array string
+                const tasksArray = [singleTask];
+                // Example for multiple tasks if UI supported it:
+                // const tasksArray = singleTask.split('\n').filter(t => t.trim() !== '');
+                const tasksJson = JSON.stringify(tasksArray);
+                console.log(`Tasks JSON: ${tasksJson}`);
 
                 try {
-                    // Call the RustAgent's automate method
-                    const result = agent.automate(task, apiKey);
-                    resultArea.textContent = result;
-                    console.log("Automation Result:", result);
+                    agent.set_llm_config(apiUrl, modelName, apiKey); 
+
+                    // Call the RustAgent's automate method with the JSON string of tasks
+                    const resultsJsonString = await agent.automate(tasksJson); 
+                    
+                    // Parse the JSON string response from Rust
+                    const results = JSON.parse(resultsJsonString); 
+                    
+                    // Display the results (e.g., pretty-printed JSON)
+                    resultArea.textContent = JSON.stringify(results, null, 2);
+                    console.log("Automation Results:", results);
+
                 } catch (error) {
                     console.error("Error during automation:", error);
-                    // Attempt to display a more useful error from Rust if possible
                     let errorMessage = "An unexpected error occurred.";
-                    if (error && typeof error.message === 'string') {
-                        errorMessage = error.message;
-                    } else if (typeof error === 'string') {
+                    // JsValue error from Rust often comes as a string directly or in a message field
+                    if (typeof error === 'string') {
                         errorMessage = error;
+                    } else if (error && typeof error.message === 'string') {
+                        errorMessage = error.message;
+                    } else {
+                        // Fallback for other JS error types
+                        errorMessage = error.toString();
                     }
                     resultArea.textContent = "Error: " + errorMessage;
                 }
