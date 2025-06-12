@@ -617,12 +617,121 @@ pub fn scroll_to(selector: &str) -> Result<(), DomError> {
     Ok(())
 }
 
+/// Simulates hovering over an element by dispatching `mouseover` and `mouseenter` events.
+///
+/// This function attempts to find the element specified by the selector. If found,
+/// it casts the element to an `HtmlElement` and then programmatically creates and dispatches
+/// both `mouseover` and `mouseenter` events on it. These events are configured to bubble
+/// and be cancelable. This is useful for triggering hover-dependent UI changes or
+/// JavaScript logic.
+///
+/// # Arguments
+/// * `selector`: A `&str` representing a CSS selector (e.g., "#myId", ".myClass")
+///   or an XPath expression (prefixed with "xpath:", e.g., "xpath://div[@id='example']")
+///   used to identify the target element.
+///
+/// # Returns
+/// * `Ok(())` if the element is found and both `mouseover` and `mouseenter` events are successfully dispatched.
+/// * `Err(DomError)` if:
+///     - The element is not found (`DomError::ElementNotFound`).
+///     - The found element cannot be cast to `HtmlElement` (`DomError::ElementTypeError`).
+///     - There's an issue creating or dispatching the mouse events (`DomError::JsError`).
+#[wasm_bindgen]
+pub fn hover_element(selector: &str) -> Result<(), DomError> {
+    console::log_1(&format!("Attempting to hover over element with selector: {}", selector).into());
+    let (window, document) = get_window_document()?;
+    let element = get_element(&document, selector)?;
+
+    let html_element = element
+        .dyn_into::<HtmlElement>()
+        .map_err(|_| DomError::ElementTypeError {
+            selector: selector.to_string(),
+            expected_type: "HtmlElement".to_string(),
+        })?;
+
+    // Create a mouse event that bubbles and is cancelable
+    let mut event_init = web_sys::MouseEventInit::new();
+    event_init.bubbles(true);
+    event_init.cancelable(true);
+    event_init.view(Some(&window));
+
+    // Dispatch mouseover event
+    let mouseover_event = web_sys::MouseEvent::new_with_event_init_dict("mouseover", &event_init)
+        .map_err(|e| DomError::JsError { message: format!("Failed to create mouseover event: {:?}", e.as_string()) })?;
+    html_element.dispatch_event(&mouseover_event)
+        .map_err(|e| DomError::JsError { message: format!("Failed to dispatch mouseover event: {:?}", e.as_string()) })?;
+
+    // Dispatch mouseenter event (often used together with mouseover for hover effects)
+    let mouseenter_event = web_sys::MouseEvent::new_with_event_init_dict("mouseenter", &event_init)
+        .map_err(|e| DomError::JsError { message: format!("Failed to create mouseenter event: {:?}", e.as_string()) })?;
+    html_element.dispatch_event(&mouseenter_event)
+        .map_err(|e| DomError::JsError { message: format!("Failed to dispatch mouseenter event: {:?}", e.as_string()) })?;
+
+    console::log_1(&format!("Successfully hovered over element with selector: {}", selector).into());
+    Ok(())
+}
+
+/// Retrieves and concatenates the inner text content from all elements matching the given selector.
+///
+/// This function finds all DOM elements that match the provided `selector`. For each
+/// matching element that is an `HtmlElement`, it extracts its `inner_text()`.
+/// Only non-empty text strings are collected. These collected text strings are then
+/// joined together into a single `String`, with the specified `separator` inserted
+/// between each piece of text.
+///
+/// # Arguments
+/// * `selector`: A `&str` representing a CSS selector (e.g., ".myClass", "div > p")
+///   or an XPath expression (prefixed with "xpath:", e.g., "xpath://ul/li") used to
+///   identify the target elements.
+/// * `separator`: A `&str` that will be used to join the `inner_text` from each
+///   matching element. For example, a newline character `"\n"`, a comma and space `", "`,
+///   or any other custom string.
+///
+/// # Returns
+/// * `Ok(String)`:
+///     - If elements are found and contain text, this is the concatenated string of their
+///       `inner_text` values, joined by the `separator`.
+///     - If no elements are found matching the `selector`, an empty string is returned.
+///     - If elements are found but none of them contain any non-empty text content (e.g.,
+///       they are empty elements or contain only other elements without text), an empty
+///       string is returned.
+/// * `Err(DomError)`: If an error occurs during element retrieval, such as an
+///   `InvalidSelector` if the provided selector string is malformed.
+#[wasm_bindgen]
+pub fn get_all_text_from_elements(selector: &str, separator: &str) -> Result<String, DomError> {
+    console::log_1(&format!("Attempting to get all text from elements matching selector: {} with separator: '{}'", selector, separator).into());
+    let (_window, document) = get_window_document()?;
+    let elements = get_all_elements(&document, selector)?;
+
+    if elements.is_empty() {
+        console::log_1(&format!("No elements found for selector '{}'. Returning empty string.", selector).into());
+        return Ok("".to_string());
+    }
+
+    let texts: Vec<String> = elements
+        .into_iter()
+        .filter_map(|el| {
+            el.dyn_into::<HtmlElement>().ok().map(|html_el| html_el.inner_text())
+        })
+        .filter(|text| !text.is_empty()) // Optionally filter out empty strings
+        .collect();
+
+    if texts.is_empty() {
+        console::log_1(&format!("Elements found for selector '{}', but they contained no text. Returning empty string.", selector).into());
+        return Ok("".to_string());
+    }
+
+    console::log_1(&format!("Successfully retrieved {} text segments for selector '{}'.", texts.len(), selector).into());
+    Ok(texts.join(separator))
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;
     use wasm_bindgen::JsValue;
+    use web_sys::{EventTarget, MouseEventInit, MouseEvent}; // Added for hover tests
     use futures::future::ready; // For simulating delays
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -1203,6 +1312,127 @@ mod tests {
         match result.unwrap_err() {
             DomError::ElementNotFound { selector, .. } => assert_eq!(selector, "css:#nonexistent-scroll-target"),
             other => panic!("Expected ElementNotFound, got {:?}", other),
+        }
+    }
+
+    // Tests for hover_element
+    #[wasm_bindgen_test]
+    async fn test_hover_element_success() {
+        let (_window, document) = get_window_document().unwrap();
+        let el_id = "hover-test-el";
+        let el = setup_element(&document, el_id, "div", Some(vec![("style", "width:50px;height:50px;background:blue;")]));
+
+        // Add event listeners to check if events are dispatched
+        let mouseover_received = std::rc::Rc::new(std::cell::Cell::new(false));
+        let mouseenter_received = std::rc::Rc::new(std::cell::Cell::new(false));
+
+        let mouseover_received_clone = mouseover_received.clone();
+        let on_mouseover = Closure::wrap(Box::new(move |_event: web_sys::MouseEvent| {
+            mouseover_received_clone.set(true);
+        }) as Box<dyn FnMut(_)>);
+
+        let mouseenter_received_clone = mouseenter_received.clone();
+        let on_mouseenter = Closure::wrap(Box::new(move |_event: web_sys::MouseEvent| {
+            mouseenter_received_clone.set(true);
+        }) as Box<dyn FnMut(_)>);
+
+        let event_target: &EventTarget = el.as_ref();
+        event_target.add_event_listener_with_callback("mouseover", on_mouseover.as_ref().unchecked_ref()).unwrap();
+        event_target.add_event_listener_with_callback("mouseenter", on_mouseenter.as_ref().unchecked_ref()).unwrap();
+        on_mouseover.forget(); // To keep the closure alive
+        on_mouseenter.forget();
+
+
+        let result = hover_element(&format!("css:#{}", el_id));
+        assert!(result.is_ok(), "hover_element failed: {:?}", result.err());
+
+        // Give a brief moment for events to be processed, though dispatch should be synchronous for basic cases.
+        // For more complex scenarios or if issues arise, a small delay might be needed here.
+        // TimeoutFuture::new(10).await;
+
+        assert!(mouseover_received.get(), "mouseover event was not received");
+        assert!(mouseenter_received.get(), "mouseenter event was not received");
+
+        cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_hover_element_no_element() {
+        let result = hover_element("css:#nonexistent-hover-target");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DomError::ElementNotFound { selector, .. } => assert_eq!(selector, "css:#nonexistent-hover-target"),
+            other => panic!("Expected ElementNotFound, got {:?}", other),
+        }
+    }
+
+    // Tests for get_all_text_from_elements
+    #[wasm_bindgen_test]
+    fn test_get_all_text_from_elements_success() {
+        let (_window, document) = get_window_document().unwrap();
+        let parent = setup_element(&document, "text-parent", "div", None);
+
+        let child1 = document.create_element("p").unwrap();
+        child1.set_id("text-child1");
+        child1.set_text_content(Some("Hello"));
+        parent.append_child(&child1).unwrap();
+
+        let child2 = document.create_element("p").unwrap();
+        child2.set_id("text-child2");
+        child2.set_text_content(Some("World"));
+        parent.append_child(&child2).unwrap();
+
+        // Element with no text
+        let child3 = document.create_element("p").unwrap();
+        child3.set_id("text-child3");
+        parent.append_child(&child3).unwrap();
+
+        // Element that is not HtmlElement (e.g. SVG), should be skipped by dyn_into
+        // let svg_el = document.create_element_ns(Some("http://www.w3.org/2000/svg"), "svg").unwrap();
+        // parent.append_child(&svg_el).unwrap();
+
+
+        let result = get_all_text_from_elements("css:#text-parent p", ", ");
+        assert!(result.is_ok(), "get_all_text_from_elements failed: {:?}", result.err());
+        assert_eq!(result.unwrap(), "Hello, World");
+
+        let result_newline = get_all_text_from_elements("css:#text-parent p", "\n");
+        assert!(result_newline.is_ok(), "get_all_text_from_elements failed: {:?}", result_newline.err());
+        assert_eq!(result_newline.unwrap(), "Hello\nWorld");
+
+        cleanup_element(parent); // Cleans children too
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_text_from_elements_no_elements_found() {
+        let result = get_all_text_from_elements("css:.nonexistent-text-class", ", ");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_text_from_elements_elements_found_no_text() {
+        let (_window, document) = get_window_document().unwrap();
+        let el1 = setup_element(&document, "no-text1", "div", None);
+        let el2 = setup_element(&document, "no-text2", "div", None);
+        el1.set_attribute("class", "no-text-class").unwrap();
+        el2.set_attribute("class", "no-text-class").unwrap();
+
+        let result = get_all_text_from_elements("css:.no-text-class", ", ");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "");
+
+        cleanup_element(el1);
+        cleanup_element(el2);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_get_all_text_from_elements_invalid_selector() {
+        let result = get_all_text_from_elements("css:[[[invalid-text-selector", ", ");
+        assert!(result.is_err());
+         match result.unwrap_err() {
+            DomError::InvalidSelector { selector, .. } => assert_eq!(selector, "css:[[[invalid-text-selector"),
+            other => panic!("Expected InvalidSelector, got {:?}", other),
         }
     }
 }

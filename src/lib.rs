@@ -1,12 +1,59 @@
 use wasm_bindgen::prelude::*;
-use crate::agent::AgentSystem;
+use crate::agent::{AgentSystem, AgentError}; // Import AgentError
+use crate::dom_utils::DomError; // Import DomError for From<AgentError>
 use web_sys; // Ensure web_sys is imported for console logging
 #[cfg(debug_assertions)]
 use console_error_panic_hook; // For better panic messages
+use serde::{Serialize, Deserialize}; // For LibError
 
 mod agent;
 mod llm;
 mod dom_utils; // Declare dom_utils module
+
+// Define LibError for serialization
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "error_type")] // This will add an "error_type" field to the JSON
+pub enum LibError {
+    DomOperation { kind: String, details: String },
+    LlmCall { message: String },
+    InvalidLlmResponse { message: String },
+    CommandParse { message: String },
+    Serialization { message: String },
+    InternalAgent { message: String }, // Fallback for other AgentErrors
+}
+
+impl From<AgentError> for LibError {
+    fn from(agent_error: AgentError) -> Self {
+        match agent_error {
+            AgentError::DomOperationFailed(dom_error) => {
+                let kind = match dom_error {
+                    DomError::ElementNotFound { .. } => "ElementNotFound".to_string(),
+                    DomError::InvalidSelector { .. } => "InvalidSelector".to_string(),
+                    DomError::ElementTypeError { .. } => "ElementTypeError".to_string(),
+                    DomError::AttributeNotFound { .. } => "AttributeNotFound".to_string(),
+                    DomError::SerializationError { .. } => "DomSerializationError".to_string(), // Distinguish from LibError::Serialization
+                    DomError::JsError { .. } => "JsError".to_string(),
+                    DomError::JsTypeError { .. } => "JsTypeError".to_string(),
+                    DomError::JsSyntaxError { .. } => "JsSyntaxError".to_string(),
+                    DomError::JsReferenceError { .. } => "JsReferenceError".to_string(),
+                };
+                LibError::DomOperation {
+                    kind,
+                    details: dom_error.to_string(),
+                }
+            }
+            AgentError::LlmCallFailed(message) => LibError::LlmCall { message },
+            AgentError::InvalidLlmResponse(message) => LibError::InvalidLlmResponse { message },
+            AgentError::CommandParseError(message) => LibError::CommandParse { message },
+            AgentError::SerializationError(message) => LibError::Serialization { message },
+            // If AgentError grows more variants, they can be mapped here or fall into a generic category.
+            // For now, let's assume any other AgentError is an InternalAgent error.
+            // To make this more robust, one might want to ensure all AgentError variants are explicitly handled.
+            // However, given the current AgentError definition, this mapping is exhaustive.
+        }
+    }
+}
+
 
 // Expose RustAgent to JavaScript
 /// `RustAgent` is the main entry point for JavaScript to interact with the Rust-based agent system.
@@ -65,15 +112,15 @@ impl RustAgent {
     ///
     /// # Returns
     /// A `Result` which, if successful (`Ok`), contains a `JsValue` that is a JSON string
-    /// representing a `Vec<Result<String, String>>`. Each item in this vector corresponds
+    /// representing a `Vec<Result<String, LibError>>`. Each item in this vector corresponds
     /// to the outcome of a task in the input list:
     ///   - `Ok(String)`: Contains the success message or result string from the task.
     ///     If the task involved LLM-returned commands, this string itself might be a
-    ///     JSON representation of `Vec<Result<String, String>>` for those sub-commands.
-    ///   - `Err(String)`: Contains the error message if the task failed.
+    ///     JSON representation of `Vec<Result<String, LibError>>` for those sub-commands (though currently it's Vec<Result<String,String>> for inner commands).
+    ///   - `Err(LibError)`: Contains the structured error if the task failed.
     ///
     /// If initial checks fail (e.g., LLM config not set, invalid `tasks_json`),
-    /// it returns `Err(JsValue)` with an error message.
+    /// it returns `Err(JsValue)` with an error message (this error is a simple string, not LibError).
     #[wasm_bindgen]
     pub async fn automate(&self, tasks_json: String) -> Result<JsValue, JsValue> {
         // 1. LLM Configuration Check: Ensure API key, URL, and model name are set.
@@ -93,7 +140,7 @@ impl RustAgent {
         }
 
         // 3. Iterate through tasks and execute
-        let mut results_list: Vec<Result<String, String>> = Vec::new();
+        let mut results_list: Vec<Result<String, LibError>> = Vec::new();
         // Stores the successful output of the previous task for placeholder substitution.
         let mut previous_task_successful_output: Option<String> = None;
 
@@ -121,14 +168,13 @@ impl RustAgent {
                     previous_task_successful_output = Some(result_string.clone());
                     results_list.push(Ok(result_string));
                 }
-                Err(error_string) => {
-                    // On failure, clear the stored output (so subsequent tasks use an empty string for {{PREVIOUS_RESULT}})
-                    // and add the error to the list of results.
-                    web_sys::console::log_1(&format!("Task failed. Clearing {{PREVIOUS_RESULT}}. Error: {}", error_string).into());
-                    previous_task_successful_output = None; 
-                    results_list.push(Err(error_string));
-                    // Optional: Implement logic to stop execution on first error if desired.
-                    // For example: return Err(JsValue::from_str(&format!("Task failed: {}", error_string))); 
+                Err(agent_error) => {
+                    // On failure, clear the stored output
+                    web_sys::console::log_1(&format!("Task failed. Clearing {{PREVIOUS_RESULT}}. Error: {}", agent_error).into());
+                    previous_task_successful_output = None;
+                    results_list.push(Err(LibError::from(agent_error))); // Convert AgentError to LibError
+                    // Optional: Stop execution on first error
+                    // For example: return Err(JsValue::from_str(&format!("Task failed: {}", LibError::from(agent_error))));
                 }
             }
         }
@@ -136,12 +182,17 @@ impl RustAgent {
         // 4. Serialize results_list and return: Convert the collected results into a JSON string.
         match serde_json::to_string(&results_list) {
             Ok(json_results) => Ok(JsValue::from_str(&json_results)),
-            Err(e) => Err(JsValue::from_str(&format!("Failed to serialize results: {}", e))),
+            Err(e) => {
+                // This serialization error should ideally be a LibError too, but JsValue is the function signature for this top-level error
+                let lib_err = LibError::Serialization { message: format!("Failed to serialize final results list: {}", e) };
+                let err_json = serde_json::to_string(&lib_err).unwrap_or_else(|_| "{\"error_type\":\"Serialization\",\"message\":\"Failed to serialize error object after failing to serialize results list.\"}".to_string());
+                Err(JsValue::from_str(&err_json))
+            }
         }
     }
 }
 
-use serde::{Serialize, Deserialize}; // For serializing/deserializing results for `automate`
+// Note: Serialize, Deserialize were already imported for LibError
 
 /// WASM entry point function, typically called once when the WASM module is initialized.
 /// This function sets up a panic hook for better debugging in browser console (in debug builds)
@@ -160,7 +211,7 @@ pub fn run() -> Result<(), JsValue> {
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;
-    use serde_json::Value; // For parsing JSON results
+    use serde_json::Value;
 
     wasm_bindgen_test_configure!(run_in_browser);
 
@@ -181,17 +232,10 @@ mod tests {
         
         let result_js = agent.automate(tasks_json).await.unwrap();
         let result_str = result_js.as_string().unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_str).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_str).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
-        // Mock for "click #first_button" returns "Clicked #first_button" (simple string)
-        // which agent.rs then wraps in "Agent X completed task via LLM: Clicked #first_button"
-        // The agent selection logic in agent.rs should pick Generic Agent (3) for "click #first_button"
-        // if parse_dom_command returns None.
-        // The mock in llm.rs for "click #first_button" returns "Clicked #first_button"
-        // This is then processed by agent.rs. If "Clicked #first_button" is NOT a JSON array of commands,
-        // it will be wrapped as "Agent 3 (Generic) completed task via LLM: Clicked #first_button"
         assert_eq!(results[0].as_ref().unwrap(), "Agent 3 (Generic) completed task via LLM: Clicked #first_button");
     }
 
@@ -206,25 +250,21 @@ mod tests {
 
         let result_js = agent.automate(tasks_json).await.unwrap();
         let result_str = result_js.as_string().unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_str).unwrap();
-        
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_str).unwrap();
+
         assert_eq!(results.len(), 2);
-        // Task 1: "get text from #element" -> LLM returns "Text from #element"
-        // Agent 3 (Generic) selected for "get text from #element"
+        assert!(results[0].is_ok());
         assert_eq!(results[0].as_ref().unwrap(), "Agent 3 (Generic) completed task via LLM: Text from #element");
 
-        // Task 2: "TYPE css:#input Text from #element"
-        // LLM returns "[{\"action\": \"TYPE\", \"selector\": \"css:#input\", \"value\": \"Text from #element\"}]"
-        // This is a JSON command, so agent.rs's run_task will try to execute it.
-        // The execution will fail because "css:#input" doesn't exist.
-        // The result of this execution will be a JSON string itself: e.g., "[{\"error\":\"Error typing...\"}]"
-        assert!(results[1].is_ok());
+        assert!(results[1].is_ok()); // The outer result for the task is Ok, because it contains a JSON string of command results
         let task2_result_str = results[1].as_ref().unwrap();
+        // The inner results are still Vec<Result<String, String>> as per current agent.rs
         let task2_inner_results: Vec<Result<String, String>> = serde_json::from_str(task2_result_str).unwrap();
         assert_eq!(task2_inner_results.len(), 1);
         assert!(task2_inner_results[0].is_err());
-        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("Error typing in element"));
-        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("css:#input"));
+        let inner_err_msg = task2_inner_results[0].as_ref().err().unwrap();
+        // The error message from agent.rs includes the DOM error string directly
+        assert!(inner_err_msg.contains("DOM Operation Failed: ElementNotFound: No element found for selector 'css:#input'"));
     }
 
     #[wasm_bindgen_test]
@@ -240,33 +280,27 @@ mod tests {
 
         let result_js = agent.automate(tasks_json).await.unwrap();
         let result_str = result_js.as_string().unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_str).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_str).unwrap();
 
         assert_eq!(results.len(), 2);
-        // Task 1: "CLICK #nonexistent_button" should fail during DOM execution.
-        // Agent 3 (Generic) selected.
         assert!(results[0].is_err());
-        assert!(results[0].as_ref().err().unwrap().contains("Agent 3 (Generic): Error clicking element:"));
-        assert!(results[0].as_ref().err().unwrap().contains("#nonexistent_button"));
+        match results[0].as_ref().err().unwrap() {
+            LibError::DomOperation { kind, details } => {
+                assert_eq!(kind, "ElementNotFound");
+                assert!(details.contains("No element found for selector '#nonexistent_button'"));
+            }
+            _ => panic!("Incorrect error type for task 1"),
+        }
 
-
-        // Task 2: "TYPE css:#input " (placeholder became empty string)
-        // Mock for "TYPE css:#input " (with empty value) returns:
-        // "[{\"action\": \"TYPE\", \"selector\": \"css:#input\", \"value\": \"\"}]"
-        // This is a JSON command, agent.rs's run_task will execute it. It will fail.
-        assert!(results[1].is_ok()); // The automate step is Ok, but the inner command execution is an Err
+        assert!(results[1].is_ok());
         let task2_result_str = results[1].as_ref().unwrap();
         let task2_inner_results: Vec<Result<String, String>> = serde_json::from_str(task2_result_str).unwrap();
         assert_eq!(task2_inner_results.len(), 1);
-        assert!(task2_inner_results[0].is_err()); // The type command itself fails
-        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("Successfully typed '' in element with selector: 'css:#input'"), "Actual: {}", task2_inner_results[0].as_ref().err().unwrap());
-        // Correction: The mock for "TYPE css:#input " returns a command to type empty string.
-        // If the element #input doesn't exist, it will be an error "Error typing in element".
-        // If it existed, it would be "Successfully typed ''..."
-        // Since it doesn't exist, it should be an error.
-        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("Error typing in element"));
+        assert!(task2_inner_results[0].is_err());
+        let inner_err_msg_task2 = task2_inner_results[0].as_ref().err().unwrap();
+        assert!(inner_err_msg_task2.contains("DOM Operation Failed: ElementNotFound: No element found for selector 'css:#input'"));
     }
-    
+
     #[wasm_bindgen_test]
     async fn test_automate_first_task_uses_placeholder_is_empty() {
         let agent = setup_agent();
@@ -277,16 +311,15 @@ mod tests {
 
         let result_js = agent.automate(tasks_json).await.unwrap();
         let result_str = result_js.as_string().unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_str).unwrap();
-        
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_str).unwrap();
+
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         let task1_result_str = results[0].as_ref().unwrap();
         let task1_inner_results: Vec<Result<String, String>> = serde_json::from_str(task1_result_str).unwrap();
         assert_eq!(task1_inner_results.len(), 1);
         assert!(task1_inner_results[0].is_err());
-        assert!(task1_inner_results[0].as_ref().err().unwrap().contains("Error typing in element"));
-        assert!(task1_inner_results[0].as_ref().err().unwrap().contains("css:#input"));
+        assert!(task1_inner_results[0].as_ref().err().unwrap().contains("DOM Operation Failed: ElementNotFound: No element found for selector 'css:#input'"));
     }
 
     #[wasm_bindgen_test]
@@ -301,11 +334,14 @@ mod tests {
 
         let result_js = agent.automate(tasks_json).await.unwrap();
         let result_str = result_js.as_string().unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_str).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_str).unwrap();
 
         assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
         assert_eq!(results[0].as_ref().unwrap(), "Agent 3 (Generic) completed task via LLM: Clicked #first_button");
+        assert!(results[1].is_ok());
         assert_eq!(results[1].as_ref().unwrap(), "Agent 3 (Generic) completed task via LLM: Processed Clicked #first_button");
+        assert!(results[2].is_ok());
         assert_eq!(results[2].as_ref().unwrap(), "Agent 3 (Generic) completed task via LLM: Final result from C");
     }
 
@@ -322,27 +358,22 @@ mod tests {
 
         let result_js = agent.automate(tasks_json).await.unwrap();
         let result_str = result_js.as_string().unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_str).unwrap();
-        
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_str).unwrap();
+
         assert_eq!(results.len(), 2);
-        // Task 1: "get simple id" -> LLM returns "element_id_123"
-        // Agent 3 (Generic) selected.
+        assert!(results[0].is_ok());
         assert_eq!(results[0].as_ref().unwrap(), "Agent 3 (Generic) completed task via LLM: element_id_123");
 
-        // Task 2: LLM receives "LLM_ACTION_EXPECTING_JSON_CMDS element_id_123"
-        // LLM returns JSON: "[{\"action\": \"CLICK\", \"selector\": \"#element_id_123\"}, {\"action\": \"READ\", \"selector\": \"#another_element\"}]"
-        // agent.rs run_task executes these. Both fail as elements don't exist.
-        // The result is a JSON string of these two errors.
         assert!(results[1].is_ok());
         let task2_result_str = results[1].as_ref().unwrap();
         let task2_inner_results: Vec<Result<String, String>> = serde_json::from_str(task2_result_str).unwrap();
         assert_eq!(task2_inner_results.len(), 2);
-        
+
         assert!(task2_inner_results[0].is_err());
-        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("Error clicking element: ElementNotFound: No element found for selector '#element_id_123'"));
+        assert!(task2_inner_results[0].as_ref().err().unwrap().contains("DOM Operation Failed: ElementNotFound: No element found for selector '#element_id_123'"));
 
         assert!(task2_inner_results[1].is_err());
-        assert!(task2_inner_results[1].as_ref().err().unwrap().contains("Error reading text from element: ElementNotFound: No element found for selector '#another_element'"));
+        assert!(task2_inner_results[1].as_ref().err().unwrap().contains("DOM Operation Failed: ElementNotFound: No element found for selector '#another_element'"));
     }
 
     // Integration tests for new commands via automate()
@@ -351,7 +382,7 @@ mod tests {
         let agent = setup_agent();
         let tasks_json = serde_json::to_string(&vec!["GET_URL"]).unwrap();
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
         assert!(results[0].as_ref().unwrap().contains("Agent 3 (Generic): Current URL is:"));
@@ -366,16 +397,18 @@ mod tests {
 
         let tasks_true_json = serde_json::to_string(&vec!["ELEMENT_EXISTS css:#integ-exists-direct"]).unwrap();
         let result_true_js = agent.automate(tasks_true_json).await.unwrap();
-        let results_true: Vec<Result<String, String>> = serde_json::from_str(&result_true_js.as_string().unwrap()).unwrap();
+        let results_true: Vec<Result<String, LibError>> = serde_json::from_str(&result_true_js.as_string().unwrap()).unwrap();
         assert_eq!(results_true.len(), 1);
+        assert!(results_true[0].is_ok());
         assert_eq!(results_true[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-exists-direct' exists: true");
 
         let tasks_false_json = serde_json::to_string(&vec!["ELEMENT_EXISTS css:#integ-nonexistent-direct"]).unwrap();
         let result_false_js = agent.automate(tasks_false_json).await.unwrap();
-        let results_false: Vec<Result<String, String>> = serde_json::from_str(&result_false_js.as_string().unwrap()).unwrap();
+        let results_false: Vec<Result<String, LibError>> = serde_json::from_str(&result_false_js.as_string().unwrap()).unwrap();
         assert_eq!(results_false.len(), 1);
+        assert!(results_false[0].is_ok());
         assert_eq!(results_false[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-nonexistent-direct' exists: false");
-        
+
         dom_utils::cleanup_element(el);
     }
 
@@ -387,18 +420,25 @@ mod tests {
 
         let tasks_success_json = serde_json::to_string(&vec!["WAIT_FOR_ELEMENT css:#integ-wait-direct 100"]).unwrap();
         let result_success_js = agent.automate(tasks_success_json).await.unwrap();
-        let results_success: Vec<Result<String, String>> = serde_json::from_str(&result_success_js.as_string().unwrap()).unwrap();
+        let results_success: Vec<Result<String, LibError>> = serde_json::from_str(&result_success_js.as_string().unwrap()).unwrap();
         assert_eq!(results_success.len(), 1);
+        assert!(results_success[0].is_ok());
         assert_eq!(results_success[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-wait-direct' appeared.");
-        
+
         dom_utils::cleanup_element(el);
 
         let tasks_timeout_json = serde_json::to_string(&vec!["WAIT_FOR_ELEMENT css:#integ-wait-timeout-direct 100"]).unwrap();
         let result_timeout_js = agent.automate(tasks_timeout_json).await.unwrap();
-        let results_timeout: Vec<Result<String, String>> = serde_json::from_str(&result_timeout_js.as_string().unwrap()).unwrap();
+        let results_timeout: Vec<Result<String, LibError>> = serde_json::from_str(&result_timeout_js.as_string().unwrap()).unwrap();
         assert_eq!(results_timeout.len(), 1);
         assert!(results_timeout[0].is_err());
-        assert!(results_timeout[0].as_ref().err().unwrap().contains("Agent 3 (Generic): Element 'css:#integ-wait-timeout-direct' not found after 100ms timeout"));
+        match results_timeout[0].as_ref().err().unwrap() {
+            LibError::DomOperation { kind, details } => {
+                assert_eq!(kind, "ElementNotFound");
+                assert!(details.contains("Element 'css:#integ-wait-timeout-direct' not found after 100ms timeout"));
+            }
+            _ => panic!("Incorrect error type for WAIT_FOR_ELEMENT timeout"),
+        }
     }
 
     // LLM-Driven Tests for new commands
@@ -407,10 +447,11 @@ mod tests {
         let agent = setup_agent();
         let tasks_json = serde_json::to_string(&vec!["What is the current page URL?"]).unwrap(); // Mock: [{"action": "GET_URL"}]
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
-        assert_eq!(results.len(), 1); // LLM response is array, automate executes each
-        let inner_result_str = results[0].as_ref().unwrap(); 
-        let inner_results: Vec<Result<String, String>> = serde_json::from_str(inner_result_str).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        let inner_result_str = results[0].as_ref().unwrap();
+        let inner_results: Vec<Result<String, String>> = serde_json::from_str(inner_result_str).unwrap(); // Inner still String errors
         assert_eq!(inner_results.len(), 1);
         assert!(inner_results[0].is_ok());
         assert!(inner_results[0].as_ref().unwrap().contains("Current URL is:"));
@@ -424,11 +465,13 @@ mod tests {
 
         let tasks_json = serde_json::to_string(&vec!["Is the button #llm-exists present?"]).unwrap(); // Mock: [{"action": "ELEMENT_EXISTS", "selector": "css:#llm-exists"}]
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        assert!(results[0].is_ok());
         let inner_results: Vec<Result<String, String>> = serde_json::from_str(results[0].as_ref().unwrap()).unwrap();
         assert_eq!(inner_results.len(), 1);
+        assert!(inner_results[0].is_ok());
         assert_eq!(inner_results[0].as_ref().unwrap(), "Element 'css:#llm-exists' exists: true");
-        
+
         dom_utils::cleanup_element(el);
     }
 
@@ -440,9 +483,11 @@ mod tests {
 
         let tasks_json = serde_json::to_string(&vec!["Wait for #llm-wait-immediate for 100ms"]).unwrap(); // Mock: [{"action": "WAIT_FOR_ELEMENT", "selector": "css:#llm-wait-immediate", "value": "100"}]
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        assert!(results[0].is_ok());
         let inner_results: Vec<Result<String, String>> = serde_json::from_str(results[0].as_ref().unwrap()).unwrap();
         assert_eq!(inner_results.len(), 1);
+        assert!(inner_results[0].is_ok());
         assert_eq!(inner_results[0].as_ref().unwrap(), "Element 'css:#llm-wait-immediate' appeared.");
 
         dom_utils::cleanup_element(el);
@@ -457,7 +502,7 @@ mod tests {
 
         let tasks_json = serde_json::to_string(&vec!["IS_VISIBLE css:#integ-visible-true"]).unwrap();
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -474,7 +519,7 @@ mod tests {
 
         let tasks_json = serde_json::to_string(&vec!["IS_VISIBLE css:#integ-visible-false"]).unwrap();
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -492,7 +537,7 @@ mod tests {
 
         let tasks_json = serde_json::to_string(&vec!["Is the #mainContent visible?"]).unwrap();
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -515,7 +560,7 @@ mod tests {
 
         let tasks_json = serde_json::to_string(&vec!["SCROLL_TO css:#integ-scroll-direct"]).unwrap();
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -539,7 +584,7 @@ mod tests {
 
         let tasks_json = serde_json::to_string(&vec!["Scroll to the footer"]).unwrap();
         let result_js = agent.automate(tasks_json).await.unwrap();
-        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+        let results: Vec<Result<String, LibError>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].is_ok());
@@ -564,33 +609,168 @@ mod tests {
         // Mock response for this task in llm.rs:
         // "[{\"action\": \"CLICK\", \"selector\": \"css:#valid\"}, {\"invalid_field\": \"some_value\", \"action\": \"EXTRA_INVALID_FIELD\"}, {\"action\": \"TYPE\", \"selector\": \"css:#anotherValid\", \"value\": \"test\"}]"
 
-        let result_js = agent.automate(tasks_json).await.unwrap(); // Outer result from automate()
+        let result_js = agent.automate(tasks_json).await.unwrap();
         let result_str_outer = result_js.as_string().unwrap();
 
-        // The outer Vec contains results for each task given to automate(). Here, only one task.
-        let results_outer: Vec<Result<String, String>> = serde_json::from_str(&result_str_outer).unwrap();
+        let results_outer: Vec<Result<String, LibError>> = serde_json::from_str(&result_str_outer).unwrap();
         assert_eq!(results_outer.len(), 1, "Expected one top-level task result");
-        assert!(results_outer[0].is_ok(), "Expected the LLM command processing itself to be Ok (even with partial failures)");
+        assert!(results_outer[0].is_ok(), "Expected the LLM command processing itself to be Ok");
 
-        // This is the JSON string representing Vec<Result<String, String>> for individual LLM commands
         let inner_json_results_str = results_outer[0].as_ref().unwrap();
+        // Inner results are still Vec<Result<String, String>> from agent.rs
         let inner_results: Vec<Result<String, String>> = serde_json::from_str(inner_json_results_str).unwrap();
-
         assert_eq!(inner_results.len(), 3, "Expected three inner command results");
 
-        // 1. Valid CLICK (fails due to non-existent element)
         assert!(inner_results[0].is_err());
-        assert!(inner_results[0].as_ref().err().unwrap().contains("Command 0 ('Action: Click, Selector: \\'css:#valid\\', Value: None, AttrName: None') failed: Error clicking element: ElementNotFound: No element found for selector 'css:#valid'"));
+        assert!(inner_results[0].as_ref().err().unwrap().contains("DOM Operation Failed: ElementNotFound: No element found for selector 'css:#valid'"));
 
-        // 2. Malformed command
         assert!(inner_results[1].is_err());
         let err_msg_malformed = inner_results[1].as_ref().err().unwrap();
-        assert!(err_msg_malformed.contains("Command at index 1 was malformed and could not be parsed:"), "Malformed command error message mismatch: {}", err_msg_malformed);
-        assert!(err_msg_malformed.contains("{\"invalid_field\":\"some_value\",\"action\":\"EXTRA_INVALID_FIELD\"}"), "Malformed command error did not contain original object snippet: {}", err_msg_malformed);
+        assert!(err_msg_malformed.contains("Command at index 1 was malformed and could not be parsed:"));
+        assert!(err_msg_malformed.contains("{\"invalid_field\":\"some_value\",\"action\":\"EXTRA_INVALID_FIELD\"}"));
 
-
-        // 3. Valid TYPE (fails due to non-existent element)
         assert!(inner_results[2].is_err());
-        assert!(inner_results[2].as_ref().err().unwrap().contains("Command 2 ('Action: Type, Selector: \\'css:#anotherValid\\', Value: Some(\\\"test\\\"), AttrName: None') failed: Error typing in element: ElementNotFound: No element found for selector 'css:#anotherValid'"));
+        assert!(inner_results[2].as_ref().err().unwrap().contains("DOM Operation Failed: ElementNotFound: No element found for selector 'css:#anotherValid'"));
+    }
+
+    // Helper to setup a simple element for testing directly in lib.rs tests
+    // This avoids needing dom_utils::setup_element if it's not exposed or convenient
+    fn setup_html_element_for_lib_test(id: &str, tag: &str, text_content: Option<&str>) -> web_sys::Element {
+        let window = web_sys::window().expect("no global `window` exists");
+        let document = window.document().expect("should have a document on window");
+        let element = document.create_element(tag).unwrap();
+        element.set_id(id);
+        if let Some(text) = text_content {
+            element.set_text_content(Some(text));
+        }
+        document.body().unwrap().append_child(&element).unwrap();
+        element
+    }
+
+    fn cleanup_html_element_for_lib_test(element: web_sys::Element) {
+        element.remove();
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_hover_command() {
+        let agent = setup_agent();
+        let element_id = "hoverTestElementLib";
+        let _el = setup_html_element_for_lib_test(element_id, "div", None);
+
+        // Test HOVER on existing element
+        let tasks_hover_exists_json = serde_json::to_string(&vec![format!("HOVER css:#{}", element_id)]).unwrap();
+        let result_hover_exists_js = agent.automate(tasks_hover_exists_json).await.unwrap();
+        let results_hover_exists: Vec<Result<String, LibError>> = serde_json::from_str(&result_hover_exists_js.as_string().unwrap()).unwrap();
+
+        assert_eq!(results_hover_exists.len(), 1);
+        assert!(results_hover_exists[0].is_ok(), "HOVER command failed for existing element: {:?}", results_hover_exists[0].as_ref().err());
+        assert!(results_hover_exists[0].as_ref().unwrap().contains(&format!("Successfully hovered over element 'css:#{}'", element_id)));
+
+        cleanup_html_element_for_lib_test(_el);
+
+        // Test HOVER on non-existent element
+        let tasks_hover_nonexistent_json = serde_json::to_string(&vec!["HOVER css:#nonExistentHoverLib"]).unwrap();
+        let result_hover_nonexistent_js = agent.automate(tasks_hover_nonexistent_json).await.unwrap();
+        let results_hover_nonexistent: Vec<Result<String, LibError>> = serde_json::from_str(&result_hover_nonexistent_js.as_string().unwrap()).unwrap();
+
+        assert_eq!(results_hover_nonexistent.len(), 1);
+        assert!(results_hover_nonexistent[0].is_err());
+        match results_hover_nonexistent[0].as_ref().err().unwrap() {
+            LibError::DomOperation { kind, details } => {
+                assert_eq!(kind, "ElementNotFound");
+                assert!(details.contains("No element found for selector 'css:#nonExistentHoverLib'"));
+            }
+            _ => panic!("Incorrect error type for HOVER on non-existent element"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_get_all_text_command() {
+        let agent = setup_agent();
+        let parent_id = "getAllTextParentLib";
+        let item_class = "myTestItemsLib";
+
+        let parent_el = setup_html_element_for_lib_test(parent_id, "div", None);
+        let item1 = setup_html_element_for_lib_test("item1Lib", "p", Some("Text 1"));
+        item1.set_class_name(item_class);
+        parent_el.append_child(&item1).unwrap();
+
+        let item2 = setup_html_element_for_lib_test("item2Lib", "p", Some("More Text 2"));
+        item2.set_class_name(item_class);
+        parent_el.append_child(&item2).unwrap();
+
+        let item3_empty = setup_html_element_for_lib_test("item3LibEmpty", "p", Some("")); // Empty text
+        item3_empty.set_class_name(item_class);
+        parent_el.append_child(&item3_empty).unwrap();
+
+        // Test with default separator (newline)
+        let tasks_default_sep_json = serde_json::to_string(&vec![format!("GET_ALL_TEXT css:#{} .{}", parent_id, item_class)]).unwrap();
+        let result_default_sep_js = agent.automate(tasks_default_sep_json).await.unwrap();
+        let results_default_sep: Vec<Result<String, LibError>> = serde_json::from_str(&result_default_sep_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_default_sep.len(), 1);
+        assert!(results_default_sep[0].is_ok(), "GET_ALL_TEXT (default sep) failed: {:?}", results_default_sep[0].as_ref().err());
+        assert!(results_default_sep[0].as_ref().unwrap().contains("Retrieved text from elements matching 'css:#getAllTextParentLib .myTestItemsLib' (separated by '\\n'): \"Text 1\nMore Text 2\""), "Actual: {}", results_default_sep[0].as_ref().unwrap());
+
+
+        // Test with custom separator "---"
+        let tasks_custom_sep_json = serde_json::to_string(&vec![format!("GET_ALL_TEXT css:#{} .{} \"---\"", parent_id, item_class)]).unwrap();
+        let result_custom_sep_js = agent.automate(tasks_custom_sep_json).await.unwrap();
+        let results_custom_sep: Vec<Result<String, LibError>> = serde_json::from_str(&result_custom_sep_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_custom_sep.len(), 1);
+        assert!(results_custom_sep[0].is_ok(), "GET_ALL_TEXT (custom sep) failed: {:?}", results_custom_sep[0].as_ref().err());
+        assert!(results_custom_sep[0].as_ref().unwrap().contains("Retrieved text from elements matching 'css:#getAllTextParentLib .myTestItemsLib' (separated by '---'): \"Text 1---More Text 2\""));
+
+        // Test with custom separator including spaces (quoted)
+        let tasks_quoted_sep_json = serde_json::to_string(&vec![format!("GET_ALL_TEXT css:#{} .{} \" | \"", parent_id, item_class)]).unwrap();
+        let result_quoted_sep_js = agent.automate(tasks_quoted_sep_json).await.unwrap();
+        let results_quoted_sep: Vec<Result<String, LibError>> = serde_json::from_str(&result_quoted_sep_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_quoted_sep.len(), 1);
+        assert!(results_quoted_sep[0].is_ok(), "GET_ALL_TEXT (quoted sep) failed: {:?}", results_quoted_sep[0].as_ref().err());
+        assert!(results_quoted_sep[0].as_ref().unwrap().contains("Retrieved text from elements matching 'css:#getAllTextParentLib .myTestItemsLib' (separated by ' | '): \"Text 1 | More Text 2\""));
+
+
+        cleanup_html_element_for_lib_test(parent_el); // item1, item2, item3_empty are children
+
+        // Test no elements found
+        let tasks_no_elements_json = serde_json::to_string(&vec!["GET_ALL_TEXT css:.nonExistentItemsLib"]).unwrap();
+        let result_no_elements_js = agent.automate(tasks_no_elements_json).await.unwrap();
+        let results_no_elements: Vec<Result<String, LibError>> = serde_json::from_str(&result_no_elements_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_no_elements.len(), 1);
+        assert!(results_no_elements[0].is_ok());
+        assert!(results_no_elements[0].as_ref().unwrap().contains("Retrieved text from elements matching 'css:.nonExistentItemsLib' (separated by '\\n'): \"\""));
+
+        // Test elements found but no text content (setup new elements for this)
+        let parent_no_text_id = "noTextParentLib";
+        let parent_no_text_el = setup_html_element_for_lib_test(parent_no_text_id, "div", None);
+        let item_no_text1 = setup_html_element_for_lib_test("itemNoText1Lib", "p", Some(""));
+        item_no_text1.set_class_name("noTestItemsLib");
+        parent_no_text_el.append_child(&item_no_text1).unwrap();
+        let item_no_text2 = setup_html_element_for_lib_test("itemNoText2Lib", "p", None); // No text content at all
+        item_no_text2.set_class_name("noTestItemsLib");
+        parent_no_text_el.append_child(&item_no_text2).unwrap();
+
+        let tasks_no_text_json = serde_json::to_string(&vec![format!("GET_ALL_TEXT css:#{} .noTestItemsLib", parent_no_text_id)]).unwrap();
+        let result_no_text_js = agent.automate(tasks_no_text_json).await.unwrap();
+        let results_no_text: Vec<Result<String, LibError>> = serde_json::from_str(&result_no_text_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_no_text.len(), 1);
+        assert!(results_no_text[0].is_ok());
+        assert!(results_no_text[0].as_ref().unwrap().contains(&format!("Retrieved text from elements matching 'css:#{} .noTestItemsLib' (separated by '\\n'): \"\"", parent_no_text_id)));
+
+        cleanup_html_element_for_lib_test(parent_no_text_el);
+
+
+        // Test invalid selector
+        let tasks_invalid_selector_json = serde_json::to_string(&vec!["GET_ALL_TEXT css:[[["]).unwrap();
+        let result_invalid_selector_js = agent.automate(tasks_invalid_selector_json).await.unwrap();
+        let results_invalid_selector: Vec<Result<String, LibError>> = serde_json::from_str(&result_invalid_selector_js.as_string().unwrap()).unwrap();
+        assert_eq!(results_invalid_selector.len(), 1);
+        assert!(results_invalid_selector[0].is_err());
+        match results_invalid_selector[0].as_ref().err().unwrap() {
+            LibError::DomOperation { kind, details } => {
+                assert_eq!(kind, "InvalidSelector");
+                assert!(details.contains("Invalid selector 'css:[[['"));
+            }
+            _ => panic!("Incorrect error type for GET_ALL_TEXT with invalid selector"),
+        }
     }
 }
