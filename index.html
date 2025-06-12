@@ -1,27 +1,151 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>RustAgent</title>
+    <meta charset="UTF-8">
+    <title>RustAgent - Interactive Demo</title>
+    <style>
+        body { font-family: sans-serif; margin: 20px; background-color: #f4f4f4; }
+        h1 { text-align: center; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); max-width: 700px; margin: auto; }
+        .input-group { margin-bottom: 15px; }
+        .input-group label { display: block; margin-bottom: 5px; color: #555; font-weight: bold; }
+        .input-group input[type="text"] {
+            width: calc(100% - 22px); /* Full width accounting for padding/border */
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 18px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%; /* Full width button */
+            box-sizing: border-box;
+        }
+        button:hover { background-color: #0056b3; }
+        #resultArea {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ccc;
+            background-color: #e9e9e9;
+            border-radius: 4px;
+            white-space: pre-wrap; /* Preserve whitespace and newlines */
+            word-wrap: break-word; /* Break long words */
+            min-height: 70px;
+            font-family: monospace;
+            font-size: 0.9em;
+            line-height: 1.4;
+        }
+        h2 { margin-top: 30px; color: #333; border-bottom: 1px solid #eee; padding-bottom: 5px;}
+    </style>
 </head>
 <body>
-    <h1>RustAgent Demo</h1>
-    <button onclick="runAutomation()">Run Automation</button>
-    <p id="result"></p>
+    <div class="container">
+        <h1>RustAgent Interactive Demo</h1>
+
+        <div class="input-group">
+            <label for="taskInput">Task(s) (one per line, or a single task; use {{PREVIOUS_RESULT}} for context):</label>
+            <textarea id="taskInput" placeholder="e.g., READ css:h1&#10;TYPE css:#myInput {{PREVIOUS_RESULT}}" rows="3" style="width: calc(100% - 22px); padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-family: inherit;"></textarea>
+        </div>
+
+        <h2>LLM Configuration</h2>
+        <div class="input-group">
+            <label for="apiUrlInput">LLM API URL:</label>
+            <input type="text" id="apiUrlInput" value="https://api.openai.com/v1/chat/completions" placeholder="Enter LLM API URL">
+        </div>
+        <div class="input-group">
+            <label for="modelNameInput">LLM Model Name:</label>
+            <input type="text" id="modelNameInput" value="gpt-3.5-turbo" placeholder="Enter LLM Model Name">
+        </div>
+        <div class="input-group">
+            <label for="apiKeyInput">LLM API Key:</label>
+            <input type="password" id="apiKeyInput" placeholder="Enter your LLM API Key">
+        </div>
+        <button id="saveConfigButton" style="margin-bottom: 20px; background-color: #28a745;">Save LLM Configuration</button>
+        <div id="configStatus" style="margin-bottom: 20px; text-align: center;"></div>
+
+        <h2>Run Tasks</h2>
+        <button id="runButton">Run Automation</button>
+
+        <h2>Result:</h2>
+        <pre id="resultArea">Agent output will appear here...</pre>
+    </div>
 
     <script type="module">
         import init, { RustAgent } from './pkg/rustagent.js';
 
-        async function run() {
+        async function main() {
             await init(); // Initialize WASM
-            window.agent = new RustAgent(); // Global instance
+            const agent = new RustAgent(); // Instantiate the agent
+
+            const taskInput = document.getElementById('taskInput');
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            // const urlInput = document.getElementById('urlInput'); // Reference if needed in future
+            const runButton = document.getElementById('runButton');
+            const resultArea = document.getElementById('resultArea');
+
+            // Example pre-fill for easier testing (optional)
+            // taskInput.value = "TYPE #inputField Hello from RustAgent!"; 
+            // apiKeyInput.value = "YOUR_API_KEY_HERE";
+
+
+            runButton.addEventListener('click', async () => { // Make the event listener async
+                const singleTask = taskInput.value.trim(); // Keep reading from the single input for now
+                const apiKey = apiKeyInput.value.trim(); 
+                const apiUrl = document.getElementById('apiUrlInput').value.trim(); 
+                const modelName = document.getElementById('modelNameInput').value.trim();
+
+                if (!singleTask) {
+                    resultArea.textContent = "Error: Please enter a task.";
+                    return;
+                }
+                
+                // Indicate processing
+                resultArea.textContent = "Processing task(s)...";
+                
+                // Wrap the single task into a JSON array string
+                const tasksArray = [singleTask];
+                // Example for multiple tasks if UI supported it:
+                // const tasksArray = singleTask.split('\n').filter(t => t.trim() !== '');
+                const tasksJson = JSON.stringify(tasksArray);
+                console.log(`Tasks JSON: ${tasksJson}`);
+
+                try {
+                    agent.set_llm_config(apiUrl, modelName, apiKey); 
+
+                    // Call the RustAgent's automate method with the JSON string of tasks
+                    const resultsJsonString = await agent.automate(tasksJson); 
+                    
+                    // Parse the JSON string response from Rust
+                    const results = JSON.parse(resultsJsonString); 
+                    
+                    // Display the results (e.g., pretty-printed JSON)
+                    resultArea.textContent = JSON.stringify(results, null, 2);
+                    console.log("Automation Results:", results);
+
+                } catch (error) {
+                    console.error("Error during automation:", error);
+                    let errorMessage = "An unexpected error occurred.";
+                    // JsValue error from Rust often comes as a string directly or in a message field
+                    if (typeof error === 'string') {
+                        errorMessage = error;
+                    } else if (error && typeof error.message === 'string') {
+                        errorMessage = error.message;
+                    } else {
+                        // Fallback for other JS error types
+                        errorMessage = error.toString();
+                    }
+                    resultArea.textContent = "Error: " + errorMessage;
+                }
+            });
         }
 
-        window.runAutomation = function() {
-            const result = window.agent.automate("fill out login form");
-            document.getElementById("result").innerText = result;
-        };
-
-        run();
+        main().catch(console.error); // Catch any errors during initialization
     </script>
 </body>
 </html>
