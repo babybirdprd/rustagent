@@ -101,6 +101,77 @@ If the task `"READ css:#sourceData"` successfully executes, its output (e.g., `"
 
 If the preceding task fails, the `{{PREVIOUS_RESULT}}` placeholder will be replaced with an empty string. The result of a task that successfully executes multiple LLM-suggested DOM commands will be a JSON string representing the outcomes of those sub-commands; this entire JSON string would then become the `{{PREVIOUS_RESULT}}` for the next step.
 
+## Available Direct DOM Commands
+The agent system can directly parse and execute the following commands if a task string starts with one of these keywords:
+
+*   `CLICK <selector>`: Clicks the specified element.
+*   `TYPE <selector> <text_to_type>`: Types the given text into an input element.
+*   `READ <selector>`: Reads the text content of the element.
+*   `GETVALUE <selector>`: Gets the value of a form element (input, textarea, select).
+*   `GETATTRIBUTE <selector> <attribute_name>`: Gets the specified attribute's value from the element.
+*   `SETATTRIBUTE <selector> <attribute_name> <value>`: Sets an attribute on the element.
+*   `SELECTOPTION <selector> <option_value>`: Selects an option in a dropdown by its value.
+*   `GET_ALL_ATTRIBUTES <selector> <attribute_name>`: Gets a specific attribute from all elements matching the selector. Returns a JSON array of strings (attribute values) or nulls (if attribute is missing).
+*   `GET_URL`: Gets the current page URL. No arguments needed.
+*   `ELEMENT_EXISTS <selector>`: Checks if an element exists on the page (returns "true" or "false" as a string).
+*   `WAIT_FOR_ELEMENT <selector> [timeout_ms]`: Waits for an element to appear in the DOM. `timeout_ms` is optional (defaults to 5000ms).
+*   `IS_VISIBLE <selector>`: Checks if an element is currently visible in the layout (considers `display`, `visibility`, and dimensions).
+*   `SCROLL_TO <selector>`: Scrolls the page to make the specified element visible in the viewport.
+*   `HOVER <selector>`: Simulates hovering over an element. This dispatches `mouseover` and `mouseenter` events, which can trigger CSS changes or JavaScript event handlers on the page.
+*   `GET_ALL_TEXT <selector> [separator]`: Retrieves text from all elements matching the selector and concatenates them using the specified `separator`.
+    *   The `selector` argument is mandatory.
+    *   The `separator` argument is optional. If omitted, a newline character (`\n`) is used as the default separator.
+    *   If the `separator` is a single token without spaces (e.g., `---`), it can be provided directly: `GET_ALL_TEXT css:.items ---`
+    *   If the `separator` contains spaces, it must be enclosed in double quotes: `GET_ALL_TEXT css:.items " -- "`
+
+**Note:** Selectors can be CSS selectors (e.g., `css:#myId`, `.myClass`, or simply `#myId`) or XPath expressions (prefixed with `xpath:`, e.g., `xpath://div[@id='example']`). If no prefix is given, CSS is assumed.
+
+The agent can also process more general natural language queries (e.g., "summarize the page", "find the login button and click it"). In such cases, an LLM attempts to translate the query into one or more of the above DOM commands or provides a direct textual answer.
+
+### Agent Roles and Task Routing
+RustAgent employs a system of specialized agents to handle tasks:
+-   **Navigator**: Focuses on tasks related to page navigation (e.g., "go to example.com", "open the about page url"). Keywords: "navigate", "go to", "url", "open". Priority: 10.
+-   **FormFiller**: Specializes in form interactions (e.g., "type 'user' into #username", "fill the contact form"). Keywords: "fill", "type", "input", "form", "enter", "select". Priority: 10.
+-   **Generic**: A general-purpose agent that handles tasks not fitting other specializations or serves as a fallback. It has the lowest priority (0) and typically no specific keywords, relying on LLM interpretation for most unparsed tasks.
+
+When a task is received:
+1.  The system attempts to parse it as a direct DOM command (listed above). If successful, the command is executed.
+2.  If not a direct command, the system selects an agent based on keywords present in the task string and agent priorities.
+    - Agents with matching keywords are considered.
+    - The agent with the highest `priority` among those matching is chosen.
+    - In case of a tie in priority, a non-Generic agent is preferred over a Generic one if both are tied. If multiple specialized agents tie, the one defined first in the system may be chosen.
+    - If no keywords match any agent, the `Generic` agent is selected by default.
+3.  The selected agent then processes the task, potentially involving an LLM call to interpret the natural language task into specific actions or to generate a textual response.
+
+### Understanding Task Results and Errors
+The `automate()` method returns a JSON string representing an array of results, one for each task. Each result is an object indicating success (`Ok`) or failure (`Err`).
+
+-   **Success**: `{"Ok": "Success message or data returned by the command"}`
+    *   For commands like `READ` or `GET_ALL_TEXT`, the success message will contain the retrieved text.
+    *   If an LLM returns multiple commands, the `Ok` value for that task step will be a JSON string representing an array of results for those individual LLM-suggested commands.
+
+-   **Failure**: `{"Err": <LibError_object>}`
+    *   When a task fails, the `Err` field contains a structured `LibError` object. This object includes an `error_type` field indicating the general category of error.
+
+    **Example of a `LibError` object (JSON):**
+    ```json
+    {
+      "Err": {
+        "error_type": "DomOperation",
+        "kind": "ElementNotFound",
+        "details": "ElementNotFound: No element found for selector 'css:#nonExistentButton'"
+      }
+    }
+    ```
+    Other possible `error_type` values include:
+    -   `LlmCall`: For failures during the LLM API call.
+    -   `InvalidLlmResponse`: If the LLM response is malformed.
+    -   `CommandParse`: If a direct command string is unparsable.
+    -   `Serialization`: If results cannot be serialized.
+    -   `InternalAgent`: For other agent-internal errors.
+
+    The `kind` field (for `DomOperation`) provides the specific type of DOM error (e.g., `InvalidSelector`, `ElementTypeError`), and `details` (or `message` for other error types) gives a human-readable explanation.
+
 ## Project Structure
 ```
 rustagent/
