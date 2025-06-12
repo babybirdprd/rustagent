@@ -9,16 +9,25 @@ mod llm;
 mod dom_utils; // Declare dom_utils module
 
 // Expose RustAgent to JavaScript
+/// `RustAgent` is the main entry point for JavaScript to interact with the Rust-based agent system.
+/// It encapsulates an `AgentSystem` and handles configuration for LLM (Large Language Model) interactions.
 #[wasm_bindgen]
 pub struct RustAgent {
+    /// The core agent system that manages and runs agents.
     agents: AgentSystem,
+    /// Optional URL for the LLM API endpoint.
     api_url: Option<String>,
+    /// Optional name of the LLM model to be used.
     model_name: Option<String>,
+    /// Optional API key for authenticating with the LLM service.
     api_key: Option<String>,
 }
 
 #[wasm_bindgen]
 impl RustAgent {
+    /// Creates a new instance of `RustAgent`.
+    /// Initializes the underlying `AgentSystem` with a default set of agents.
+    /// LLM configuration is initially unset.
     #[wasm_bindgen(constructor)]
     pub fn new() -> RustAgent {
         RustAgent {
@@ -29,6 +38,13 @@ impl RustAgent {
         }
     }
 
+    /// Sets the configuration for the Large Language Model (LLM) to be used by the agents.
+    /// All parameters are required to enable LLM-based task processing.
+    ///
+    /// # Arguments
+    /// * `api_url`: The URL of the LLM API endpoint.
+    /// * `model_name`: The specific model name to use (e.g., "gpt-3.5-turbo").
+    /// * `api_key`: The API key for authentication with the LLM service.
     #[wasm_bindgen]
     pub fn set_llm_config(&mut self, api_url: String, model_name: String, api_key: String) {
         self.api_url = Some(api_url);
@@ -36,23 +52,37 @@ impl RustAgent {
         self.api_key = Some(api_key);
     }
 
-// ... (rest of the existing imports)
-
-// Define a serializable struct for results if needed for more complex data,
-// but Vec<Result<String, String>> can be serialized directly by serde_json.
-
-// ... (RustAgent struct and new/set_llm_config methods remain the same)
-
-    // Example method: Automate a task by delegating to agents
+    /// Automates a list of tasks provided as a JSON string.
+    ///
+    /// Each task in the list is processed sequentially. If a task string contains the
+    /// placeholder `{{PREVIOUS_RESULT}}`, it will be substituted with the successful
+    /// output of the immediately preceding task. If the preceding task failed,
+    /// `{{PREVIOUS_RESULT}}` is replaced with an empty string.
+    ///
+    /// # Arguments
+    /// * `tasks_json`: A JSON string representing a list of tasks.
+    ///   Example: `["CLICK css:#button", "READ css:#label {{PREVIOUS_RESULT}}"]`
+    ///
+    /// # Returns
+    /// A `Result` which, if successful (`Ok`), contains a `JsValue` that is a JSON string
+    /// representing a `Vec<Result<String, String>>`. Each item in this vector corresponds
+    /// to the outcome of a task in the input list:
+    ///   - `Ok(String)`: Contains the success message or result string from the task.
+    ///     If the task involved LLM-returned commands, this string itself might be a
+    ///     JSON representation of `Vec<Result<String, String>>` for those sub-commands.
+    ///   - `Err(String)`: Contains the error message if the task failed.
+    ///
+    /// If initial checks fail (e.g., LLM config not set, invalid `tasks_json`),
+    /// it returns `Err(JsValue)` with an error message.
     #[wasm_bindgen]
     pub async fn automate(&self, tasks_json: String) -> Result<JsValue, JsValue> {
-        // 1. LLM Configuration Check
+        // 1. LLM Configuration Check: Ensure API key, URL, and model name are set.
         let (api_key, api_url, model_name) = match (&self.api_key, &self.api_url, &self.model_name) {
             (Some(k), Some(u), Some(m)) => (k, u, m),
             _ => return Err(JsValue::from_str("LLM configuration not set. Please call set_llm_config first.")),
         };
 
-        // 2. Parse tasks_json
+        // 2. Parse tasks_json: Deserialize the input JSON string into a vector of task strings.
         let tasks: Vec<String> = match serde_json::from_str(&tasks_json) {
             Ok(parsed_tasks) => parsed_tasks,
             Err(_) => return Err(JsValue::from_str("Invalid JSON task list. Expected an array of strings.")),
@@ -64,12 +94,14 @@ impl RustAgent {
 
         // 3. Iterate through tasks and execute
         let mut results_list: Vec<Result<String, String>> = Vec::new();
-        let mut previous_task_successful_output: Option<String> = None; // Renamed for clarity
+        // Stores the successful output of the previous task for placeholder substitution.
+        let mut previous_task_successful_output: Option<String> = None;
 
-        for original_task_template in tasks { // Renamed for clarity
+        for original_task_template in tasks {
             web_sys::console::log_1(&format!("Original task template: {}", original_task_template).into());
 
             let current_task_string: String;
+            // Substitute {{PREVIOUS_RESULT}} placeholder if present.
             if original_task_template.contains("{{PREVIOUS_RESULT}}") {
                 let replacement_value = previous_task_successful_output.as_deref().unwrap_or("");
                 web_sys::console::log_1(&format!("Placeholder {{PREVIOUS_RESULT}} found. Replacing with: '{}'", replacement_value).into());
@@ -80,23 +112,28 @@ impl RustAgent {
             
             web_sys::console::log_1(&format!("Executing task (after substitution): {}", current_task_string).into());
 
+            // Run the task using the agent system.
             match self.agents.run_task(&current_task_string, api_key, api_url, model_name).await {
                 Ok(result_string) => {
+                    // On success, store the output for potential use in the next task
+                    // and add it to the list of results for this task sequence.
                     web_sys::console::log_1(&format!("Task succeeded. Storing for {{PREVIOUS_RESULT}}: {}", result_string).into());
                     previous_task_successful_output = Some(result_string.clone());
                     results_list.push(Ok(result_string));
                 }
                 Err(error_string) => {
+                    // On failure, clear the stored output (so subsequent tasks use an empty string for {{PREVIOUS_RESULT}})
+                    // and add the error to the list of results.
                     web_sys::console::log_1(&format!("Task failed. Clearing {{PREVIOUS_RESULT}}. Error: {}", error_string).into());
                     previous_task_successful_output = None; 
                     results_list.push(Err(error_string));
-                    // Optional: Stop execution on first error can be added here if desired
+                    // Optional: Implement logic to stop execution on first error if desired.
                     // For example: return Err(JsValue::from_str(&format!("Task failed: {}", error_string))); 
                 }
             }
         }
 
-        // 4. Serialize results_list and return
+        // 4. Serialize results_list and return: Convert the collected results into a JSON string.
         match serde_json::to_string(&results_list) {
             Ok(json_results) => Ok(JsValue::from_str(&json_results)),
             Err(e) => Err(JsValue::from_str(&format!("Failed to serialize results: {}", e))),
@@ -104,13 +141,16 @@ impl RustAgent {
     }
 }
 
-use serde::{Serialize, Deserialize}; // For serializing/deserializing results
+use serde::{Serialize, Deserialize}; // For serializing/deserializing results for `automate`
 
-// Initialize WASM module and log to console
+/// WASM entry point function, typically called once when the WASM module is initialized.
+/// This function sets up a panic hook for better debugging in browser console (in debug builds)
+/// and logs a message to the console indicating the module has been initialized.
 #[wasm_bindgen(start)]
 pub fn run() -> Result<(), JsValue> {
+    // When the `console_error_panic_hook` feature is enabled, this will print panic messages to the console.
     #[cfg(debug_assertions)]
-    console_error_panic_hook::set_once(); // Better panic messages in browser
+    console_error_panic_hook::set_once();
     web_sys::console::log_1(&"RustAgent WASM module initialized!".into());
     Ok(())
 }
@@ -406,5 +446,151 @@ mod tests {
         assert_eq!(inner_results[0].as_ref().unwrap(), "Element 'css:#llm-wait-immediate' appeared.");
 
         dom_utils::cleanup_element(el);
+    }
+
+    // Integration tests for IS_VISIBLE
+    #[wasm_bindgen_test]
+    async fn test_automate_is_visible_direct_command_true() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        let el = dom_utils::setup_element(&document, "integ-visible-true", "div", Some(vec![("style", "width:10px; height:10px;")]));
+
+        let tasks_json = serde_json::to_string(&vec!["IS_VISIBLE css:#integ-visible-true"]).unwrap();
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert_eq!(results[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-visible-true' is visible: true");
+
+        dom_utils::cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_is_visible_direct_command_false() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        let el = dom_utils::setup_element(&document, "integ-visible-false", "div", Some(vec![("style", "display:none;")]));
+
+        let tasks_json = serde_json::to_string(&vec!["IS_VISIBLE css:#integ-visible-false"]).unwrap();
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert_eq!(results[0].as_ref().unwrap(), "Agent 3 (Generic): Element 'css:#integ-visible-false' is visible: false");
+
+        dom_utils::cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_llm_is_visible() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        // Mock "Is the #mainContent visible?" -> [{"action": "IS_VISIBLE", "selector": "css:#mainContent"}]
+        let el = dom_utils::setup_element(&document, "mainContent", "div", Some(vec![("style", "width:10px; height:10px;")]));
+
+        let tasks_json = serde_json::to_string(&vec!["Is the #mainContent visible?"]).unwrap();
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        let inner_result_str = results[0].as_ref().unwrap();
+        let inner_results: Vec<Result<String, String>> = serde_json::from_str(inner_result_str).unwrap();
+        assert_eq!(inner_results.len(), 1);
+        assert!(inner_results[0].is_ok());
+        assert_eq!(inner_results[0].as_ref().unwrap(), "Element 'css:#mainContent' is visible: true");
+
+        dom_utils::cleanup_element(el);
+    }
+
+    // Integration tests for SCROLL_TO
+    #[wasm_bindgen_test]
+    async fn test_automate_scroll_to_direct_command() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        document.body().unwrap().set_attribute("style", "height: 2000px;").unwrap();
+        let el = dom_utils::setup_element(&document, "integ-scroll-direct", "div", Some(vec![("style", "margin-top: 1800px; height: 50px;")]));
+
+        let tasks_json = serde_json::to_string(&vec!["SCROLL_TO css:#integ-scroll-direct"]).unwrap();
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        assert_eq!(results[0].as_ref().unwrap(), "Agent 3 (Generic): Successfully scrolled to element 'css:#integ-scroll-direct'");
+
+        let final_scroll_y = web_sys::window().unwrap().scroll_y().unwrap_or(0.0);
+        assert!(final_scroll_y > 1500.0, "Final scroll Y ({}) should be significantly greater after scroll_to", final_scroll_y);
+
+        dom_utils::cleanup_element(el);
+        document.body().unwrap().remove_attribute("style").unwrap();
+        web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_llm_scroll_to() {
+        let agent = setup_agent();
+        let (_window, document) = dom_utils::get_window_document().unwrap();
+        document.body().unwrap().set_attribute("style", "height: 2000px;").unwrap();
+        // Mock "Scroll to the footer" -> [{"action": "SCROLL_TO", "selector": "css:footer"}]
+        let el = dom_utils::setup_element(&document, "footer", "footer", Some(vec![("style", "margin-top: 1800px; height: 50px;")]));
+
+        let tasks_json = serde_json::to_string(&vec!["Scroll to the footer"]).unwrap();
+        let result_js = agent.automate(tasks_json).await.unwrap();
+        let results: Vec<Result<String, String>> = serde_json::from_str(&result_js.as_string().unwrap()).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        let inner_result_str = results[0].as_ref().unwrap();
+        let inner_results: Vec<Result<String, String>> = serde_json::from_str(inner_result_str).unwrap();
+        assert_eq!(inner_results.len(), 1);
+        assert!(inner_results[0].is_ok());
+        assert_eq!(inner_results[0].as_ref().unwrap(), "Successfully scrolled to element 'css:footer'");
+
+        let final_scroll_y = web_sys::window().unwrap().scroll_y().unwrap_or(0.0);
+        assert!(final_scroll_y > 1500.0, "Final scroll Y ({}) should be significantly greater after scroll_to", final_scroll_y);
+
+        dom_utils::cleanup_element(el);
+        document.body().unwrap().remove_attribute("style").unwrap();
+        web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_automate_llm_mixed_validity_commands() {
+        let agent = setup_agent();
+        let tasks_json = serde_json::to_string(&vec!["task with mixed valid and malformed json commands"]).unwrap();
+        // Mock response for this task in llm.rs:
+        // "[{\"action\": \"CLICK\", \"selector\": \"css:#valid\"}, {\"invalid_field\": \"some_value\", \"action\": \"EXTRA_INVALID_FIELD\"}, {\"action\": \"TYPE\", \"selector\": \"css:#anotherValid\", \"value\": \"test\"}]"
+
+        let result_js = agent.automate(tasks_json).await.unwrap(); // Outer result from automate()
+        let result_str_outer = result_js.as_string().unwrap();
+
+        // The outer Vec contains results for each task given to automate(). Here, only one task.
+        let results_outer: Vec<Result<String, String>> = serde_json::from_str(&result_str_outer).unwrap();
+        assert_eq!(results_outer.len(), 1, "Expected one top-level task result");
+        assert!(results_outer[0].is_ok(), "Expected the LLM command processing itself to be Ok (even with partial failures)");
+
+        // This is the JSON string representing Vec<Result<String, String>> for individual LLM commands
+        let inner_json_results_str = results_outer[0].as_ref().unwrap();
+        let inner_results: Vec<Result<String, String>> = serde_json::from_str(inner_json_results_str).unwrap();
+
+        assert_eq!(inner_results.len(), 3, "Expected three inner command results");
+
+        // 1. Valid CLICK (fails due to non-existent element)
+        assert!(inner_results[0].is_err());
+        assert!(inner_results[0].as_ref().err().unwrap().contains("Command 0 ('Action: Click, Selector: \\'css:#valid\\', Value: None, AttrName: None') failed: Error clicking element: ElementNotFound: No element found for selector 'css:#valid'"));
+
+        // 2. Malformed command
+        assert!(inner_results[1].is_err());
+        let err_msg_malformed = inner_results[1].as_ref().err().unwrap();
+        assert!(err_msg_malformed.contains("Command at index 1 was malformed and could not be parsed:"), "Malformed command error message mismatch: {}", err_msg_malformed);
+        assert!(err_msg_malformed.contains("{\"invalid_field\":\"some_value\",\"action\":\"EXTRA_INVALID_FIELD\"}"), "Malformed command error did not contain original object snippet: {}", err_msg_malformed);
+
+
+        // 3. Valid TYPE (fails due to non-existent element)
+        assert!(inner_results[2].is_err());
+        assert!(inner_results[2].as_ref().err().unwrap().contains("Command 2 ('Action: Type, Selector: \\'css:#anotherValid\\', Value: Some(\\\"test\\\"), AttrName: None') failed: Error typing in element: ElementNotFound: No element found for selector 'css:#anotherValid'"));
     }
 }

@@ -7,14 +7,32 @@ use gloo_timers::future::{TimeoutFuture, IntervalStream};
 use futures_util::stream::StreamExt; // For IntervalStream.next()
 use futures::future::{select, Either}; // For select pattern
 
+/// Represents errors that can occur during DOM operations.
 #[derive(Debug, PartialEq)]
 pub enum DomError {
-    ElementNotFound { selector: String, message: Option<String> },
+    /// Indicates that an element could not be found using the provided selector.
+    ElementNotFound {
+        selector: String,
+        /// Optional detailed message, e.g., from `wait_for_element` timeout.
+        message: Option<String>
+    },
+    /// Indicates that the provided selector (CSS or XPath) is invalid.
     InvalidSelector { selector: String, error: String },
+    /// Indicates that an element was found but is not of the expected HTML element type
+    /// (e.g., trying to use `type_in_element` on a `<div>`).
     ElementTypeError { selector: String, expected_type: String },
+    /// Indicates that a specified attribute was not found on the element.
     AttributeNotFound { selector: String, attribute_name: String },
+    /// Indicates an error during JSON serialization of results.
     SerializationError { message: String },
+    /// A generic JavaScript error occurred that doesn't fit other categories.
     JsError { message: String },
+    /// A JavaScript `TypeError` occurred (e.g., calling a method on an undefined object).
+    JsTypeError { message: String },
+    /// A JavaScript `SyntaxError` occurred (e.g., an invalid selector string passed to `document.querySelector`).
+    JsSyntaxError { message: String },
+    /// A JavaScript `ReferenceError` occurred (e.g., accessing an undefined variable).
+    JsReferenceError { message: String },
 }
 
 impl fmt::Display for DomError {
@@ -32,10 +50,24 @@ impl fmt::Display for DomError {
             DomError::AttributeNotFound { selector, attribute_name } => write!(f, "AttributeNotFound: Attribute '{}' not found on element with selector '{}'", attribute_name, selector),
             DomError::SerializationError { message } => write!(f, "SerializationError: {}", message),
             DomError::JsError { message } => write!(f, "JsError: {}", message),
+            DomError::JsTypeError { message } => write!(f, "JsTypeError: {}", message),
+            DomError::JsSyntaxError { message } => write!(f, "JsSyntaxError: {}", message),
+            DomError::JsReferenceError { message } => write!(f, "JsReferenceError: {}", message),
         }
     }
 }
 
+/// Checks if an element matching the given selector exists in the DOM.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector (e.g., "#myId", ".myClass")
+///   or an XPath expression (prefixed with "xpath:", e.g., "xpath://div[@id='example']").
+///   If no prefix is provided, it defaults to a CSS selector.
+///
+/// # Returns
+/// * `Ok(true)` if the element exists.
+/// * `Ok(false)` if the element does not exist (specifically due to `DomError::ElementNotFound`).
+/// * `Err(DomError)` for other errors, such as an invalid selector syntax.
 #[wasm_bindgen]
 pub fn element_exists(selector: &str) -> Result<bool, DomError> {
     let (_window, document) = get_window_document()?;
@@ -48,8 +80,22 @@ pub fn element_exists(selector: &str) -> Result<bool, DomError> {
 
 impl From<JsValue> for DomError {
     fn from(value: JsValue) -> Self {
-        DomError::JsError {
-            message: value.as_string().unwrap_or_else(|| "Unknown JsValue error".to_string()),
+        if value.is_instance_of::<js_sys::TypeError>() {
+            DomError::JsTypeError {
+                message: js_sys::Error::from(value).message().into(),
+            }
+        } else if value.is_instance_of::<js_sys::SyntaxError>() {
+            DomError::JsSyntaxError {
+                message: js_sys::Error::from(value).message().into(),
+            }
+        } else if value.is_instance_of::<js_sys::ReferenceError>() {
+            DomError::JsReferenceError {
+                message: js_sys::Error::from(value).message().into(),
+            }
+        } else {
+            DomError::JsError {
+                message: value.as_string().unwrap_or_else(|| "Unknown JsValue error".to_string()),
+            }
         }
     }
 }
@@ -172,6 +218,15 @@ fn get_all_elements(document: &Document, original_selector: &str) -> Result<Vec<
 }
 
 
+/// Clicks an element identified by the given selector.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression.
+///   If no prefix is provided, it defaults to a CSS selector.
+///
+/// # Returns
+/// * `Ok(())` if the click was successful.
+/// * `Err(DomError)` if the element is not found, not a clickable `HtmlElement`, or another error occurs.
 #[wasm_bindgen]
 pub fn click_element(selector: &str) -> Result<(), DomError> {
     console::log_1(&format!("Attempting to click element with selector: {}", selector).into());
@@ -192,6 +247,17 @@ pub fn click_element(selector: &str) -> Result<(), DomError> {
     Ok(())
 }
 
+/// Types the given text into an input element identified by the selector.
+/// The element must be an `HTMLInputElement`.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression for the input element.
+///   If no prefix is provided, it defaults to a CSS selector.
+/// * `text`: The text to type into the element.
+///
+/// # Returns
+/// * `Ok(())` if typing was successful.
+/// * `Err(DomError)` if the element is not found, not an `HTMLInputElement`, or another error occurs.
 #[wasm_bindgen]
 pub fn type_in_element(selector: &str, text: &str) -> Result<(), DomError> {
     console::log_1(&format!("Attempting to type '{}' in element with selector: {}", text, selector).into());
@@ -212,6 +278,16 @@ pub fn type_in_element(selector: &str, text: &str) -> Result<(), DomError> {
     Ok(())
 }
 
+/// Retrieves the inner text content of an element identified by the selector.
+/// The element should be an `HtmlElement` or subclass.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression.
+///   If no prefix is provided, it defaults to a CSS selector.
+///
+/// # Returns
+/// * `Ok(String)` containing the text content if successful.
+/// * `Err(DomError)` if the element is not found, not an `HtmlElement`, or another error occurs.
 #[wasm_bindgen]
 pub fn get_element_text(selector: &str) -> Result<String, DomError> {
     console::log_1(&format!("Attempting to get text from element with selector: {}", selector).into());
@@ -230,6 +306,16 @@ pub fn get_element_text(selector: &str) -> Result<String, DomError> {
     Ok(html_element.inner_text())
 }
 
+/// Retrieves the value of an input, textarea, or select element identified by the selector.
+/// The element must be an `HTMLInputElement`.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression for the form element.
+///   If no prefix is provided, it defaults to a CSS selector.
+///
+/// # Returns
+/// * `Ok(String)` containing the element's value if successful.
+/// * `Err(DomError)` if the element is not found, not an `HTMLInputElement`, or another error occurs.
 #[wasm_bindgen]
 pub fn get_element_value(selector: &str) -> Result<String, DomError> {
     console::log_1(&format!("Attempting to get value from input element with selector: {}", selector).into());
@@ -248,6 +334,17 @@ pub fn get_element_value(selector: &str) -> Result<String, DomError> {
     Ok(input_element.value())
 }
 
+/// Retrieves the value of a specified attribute from an element identified by the selector.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression.
+///   If no prefix is provided, it defaults to a CSS selector.
+/// * `attribute_name`: The name of the attribute to retrieve.
+///
+/// # Returns
+/// * `Ok(String)` containing the attribute's value if successful.
+/// * `Err(DomError::AttributeNotFound)` if the attribute does not exist on the element.
+/// * `Err(DomError)` for other errors, such as element not found or invalid selector.
 #[wasm_bindgen]
 pub fn get_element_attribute(selector: &str, attribute_name: &str) -> Result<String, DomError> {
     console::log_1(&format!("Attempting to get attribute '{}' from element with selector: {}", attribute_name, selector).into());
@@ -266,10 +363,25 @@ pub fn get_element_attribute(selector: &str, attribute_name: &str) -> Result<Str
     }
 }
 
+/// Waits for an element matching the selector to exist in the DOM within a specified timeout.
+///
+/// Polls the DOM at regular intervals (currently 100ms) until the element is found
+/// or the timeout is reached.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression.
+///   If no prefix is provided, it defaults to a CSS selector.
+/// * `timeout_ms`: An optional timeout in milliseconds. If `None`, a default timeout (5000ms) is used.
+///
+/// # Returns
+/// * `Ok(())` if the element appears within the timeout.
+/// * `Err(DomError::ElementNotFound)` if the element does not appear within the timeout,
+///   with a message indicating the timeout duration.
+/// * `Err(DomError)` for other errors, such as an invalid selector.
 #[wasm_bindgen]
 pub async fn wait_for_element(selector: &str, timeout_ms: Option<u32>) -> Result<(), DomError> {
-    const DEFAULT_TIMEOUT_MS: u32 = 5000;
-    const INTERVAL_MS: u32 = 100; // Polling interval
+    const DEFAULT_TIMEOUT_MS: u32 = 5000; // Default timeout: 5 seconds
+    const INTERVAL_MS: u32 = 100; // Polling interval: 100 milliseconds
     let timeout_duration = timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS);
 
     let main_future = async {
@@ -298,7 +410,17 @@ pub async fn wait_for_element(selector: &str, timeout_ms: Option<u32>) -> Result
     }
 }
 
-
+/// Sets an attribute on an element identified by the selector.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression.
+///   If no prefix is provided, it defaults to a CSS selector.
+/// * `attribute_name`: The name of the attribute to set.
+/// * `attribute_value`: The value to set for the attribute.
+///
+/// # Returns
+/// * `Ok(())` if the attribute was set successfully.
+/// * `Err(DomError)` if the element is not found or the attribute cannot be set (e.g., invalid attribute name, read-only attribute).
 #[wasm_bindgen]
 pub fn set_element_attribute(selector: &str, attribute_name: &str, attribute_value: &str) -> Result<(), DomError> {
     console::log_1(&format!("Attempting to set attribute '{}' to '{}' for element with selector: {}", attribute_name, attribute_value, selector).into());
@@ -314,6 +436,17 @@ pub fn set_element_attribute(selector: &str, attribute_name: &str, attribute_val
     Ok(())
 }
 
+/// Selects an option in a dropdown (`<select>`) element identified by the selector by setting its value.
+/// The element must be an `HtmlSelectElement`.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression for the `<select>` element.
+///   If no prefix is provided, it defaults to a CSS selector.
+/// * `value`: The value of the `<option>` to select.
+///
+/// # Returns
+/// * `Ok(())` if the option was selected successfully.
+/// * `Err(DomError)` if the element is not found, not an `HtmlSelectElement`, or the value cannot be set.
 #[wasm_bindgen]
 pub fn select_dropdown_option(selector: &str, value: &str) -> Result<(), DomError> {
     console::log_1(&format!("Attempting to select option with value '{}' for dropdown with selector: {}", value, selector).into());
@@ -333,6 +466,18 @@ pub fn select_dropdown_option(selector: &str, value: &str) -> Result<(), DomErro
     Ok(())
 }
 
+/// Retrieves a specific attribute from all elements matching the selector and returns them as a JSON string.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression for the elements.
+///   If no prefix is provided, it defaults to a CSS selector.
+/// * `attribute_name`: The name of the attribute to retrieve from each element.
+///
+/// # Returns
+/// * `Ok(String)` containing a JSON array of attribute values. Each value in the array
+///   is either the attribute string or `null` if the attribute is missing for a specific element.
+///   Returns an empty JSON array `[]` if no elements are found.
+/// * `Err(DomError)` if an error occurs during element retrieval or JSON serialization.
 #[wasm_bindgen]
 pub fn get_all_elements_attributes(selector: &str, attribute_name: &str) -> Result<String, DomError> {
     console::log_1(&format!("Attempting to get attribute '{}' from all elements matching selector: {}", attribute_name, selector).into());
@@ -357,6 +502,11 @@ pub fn get_all_elements_attributes(selector: &str, attribute_name: &str) -> Resu
     Ok(json_string)
 }
 
+/// Retrieves the current URL of the page.
+///
+/// # Returns
+/// * `Ok(String)` containing the current URL if successful.
+/// * `Err(DomError::JsError)` if the URL cannot be retrieved from `window.location.href`.
 #[wasm_bindgen]
 pub fn get_current_url() -> Result<String, DomError> {
     let (window, _) = get_window_document()?;
@@ -366,6 +516,105 @@ pub fn get_current_url() -> Result<String, DomError> {
             message: format!("Failed to get URL: {:?}", js_val.as_string().unwrap_or_else(|| "Unknown JS error".to_string())),
         }),
     }
+}
+
+/// Checks if an element identified by the selector is currently visible on the page.
+///
+/// An element is considered visible if it meets all the following conditions:
+/// * It is present in the DOM.
+/// * Its computed `display` style is not `none`.
+/// * Its computed `visibility` style is not `hidden`.
+/// * Its bounding box has a width and height greater than 0.
+///   * If width or height is 0, it additionally checks if its computed `opacity` is "0". If so, it's considered not visible.
+///
+/// Note: This function checks the computed style of the element itself.
+/// Parent-induced invisibility (e.g., a parent with `display: none` or `visibility: hidden`)
+/// is typically reflected in the child's computed styles or bounding box dimensions.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression.
+///   If no prefix is provided, it defaults to a CSS selector.
+///
+/// # Returns
+/// * `Ok(true)` if the element is determined to be visible.
+/// * `Ok(false)` if the element is determined to be not visible.
+/// * `Err(DomError)` if the element is not found or another error occurs during style/dimension retrieval.
+#[wasm_bindgen]
+pub fn is_visible(selector: &str) -> Result<bool, DomError> {
+    console::log_1(&format!("Checking visibility for selector: {}", selector).into());
+    let (window, document) = get_window_document()?;
+    let element = get_element(&document, selector)?;
+
+    let style = window.get_computed_style(&element)
+        .map_err(|e| DomError::JsError { message: format!("Failed to get computed style for {}: {:?}", selector, e.as_string()) })?
+        .ok_or_else(|| DomError::JsError { message: format!("Computed style is null for {}", selector) })?;
+
+    let display = style.get_property_value("display")
+        .map_err(|e| DomError::JsError { message: format!("Failed to get display property for {}: {:?}", selector, e.as_string()) })?;
+    if display == "none" {
+        console::log_1(&format!("Element {} is not visible (display: none)", selector).into());
+        return Ok(false);
+    }
+
+    let visibility = style.get_property_value("visibility")
+        .map_err(|e| DomError::JsError { message: format!("Failed to get visibility property for {}: {:?}", selector, e.as_string()) })?;
+    if visibility == "hidden" {
+        console::log_1(&format!("Element {} is not visible (visibility: hidden)", selector).into());
+        return Ok(false);
+    }
+
+    let rect = element.get_bounding_client_rect();
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        // Check for opacity: 0 as well, as zero-size elements might still be considered "visible" by some definitions if opacity is not 0
+        let opacity_str = style.get_property_value("opacity")
+            .map_err(|e| DomError::JsError { message: format!("Failed to get opacity property for {}: {:?}", selector, e.as_string()) })?;
+        if let Ok(opacity_val) = opacity_str.parse::<f64>() {
+            if opacity_val <= 0.0 {
+                console::log_1(&format!("Element {} is not visible (opacity: 0)", selector).into());
+                return Ok(false);
+            }
+        }
+        // If opacity is not 0, but width/height is 0, it might still be considered not visible for interaction.
+        // However, some interpretations might vary. For now, zero width/height is sufficient.
+        console::log_1(&format!("Element {} is not visible (width: {}, height: {})", selector, rect.width(), rect.height()).into());
+        return Ok(false);
+    }
+
+    // Additionally, check parent visibility. If any parent is display:none, this isn't truly visible.
+    // This is a simplified check; a full check would traverse up the DOM tree.
+    // For now, we rely on the browser's computed style for the element itself.
+    // A more robust check might involve `offsetParent` being null, but that also has caveats.
+
+    console::log_1(&format!("Element {} is visible", selector).into());
+    Ok(true)
+}
+
+/// Scrolls the page to make the element identified by the selector visible in the viewport.
+///
+/// Uses the standard `element.scroll_into_view()` method.
+///
+/// # Arguments
+/// * `selector`: A string representing a CSS selector or an XPath expression.
+///   If no prefix is provided, it defaults to a CSS selector.
+///
+/// # Returns
+/// * `Ok(())` if scrolling was successful (or if the element was already in view and no scrolling was needed).
+/// * `Err(DomError)` if the element is not found or another error occurs.
+#[wasm_bindgen]
+pub fn scroll_to(selector: &str) -> Result<(), DomError> {
+    console::log_1(&format!("Attempting to scroll to element with selector: {}", selector).into());
+    let (_window, document) = get_window_document()?;
+    let element = get_element(&document, selector)?;
+
+    element.scroll_into_view(); // Basic scroll
+    // For more options:
+    // let mut options = web_sys::ScrollIntoViewOptions::new();
+    // options.behavior(web_sys::ScrollBehavior::Smooth);
+    // options.block(web_sys::ScrollLogicalPosition::Center);
+    // element.scroll_into_view_with_scroll_into_view_options(&options);
+
+    console::log_1(&format!("Successfully scrolled to element with selector: {}", selector).into());
+    Ok(())
 }
 
 
@@ -408,6 +657,18 @@ mod tests {
             DomError::JsError { message: "js error".to_string() }.to_string(),
             "JsError: js error"
         );
+        assert_eq!(
+            DomError::JsTypeError { message: "type error".to_string() }.to_string(),
+            "JsTypeError: type error"
+        );
+        assert_eq!(
+            DomError::JsSyntaxError { message: "syntax error".to_string() }.to_string(),
+            "JsSyntaxError: syntax error"
+        );
+        assert_eq!(
+            DomError::JsReferenceError { message: "reference error".to_string() }.to_string(),
+            "JsReferenceError: reference error"
+        );
     }
 
     #[test]
@@ -418,12 +679,45 @@ mod tests {
     }
 
     #[test]
-    fn test_dom_error_from_js_value() {
+    fn test_dom_error_from_js_value_generic() {
         let js_value_error = JsValue::from_str("generic js error");
         let dom_error: DomError = js_value_error.into();
         match dom_error {
             DomError::JsError { message } => assert_eq!(message, "generic js error"),
-            _ => panic!("Incorrect DomError variant from JsValue"),
+            _ => panic!("Incorrect DomError variant for generic JsValue"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_dom_error_from_js_value_type_error() {
+        let js_error = js_sys::TypeError::new("test type error");
+        let js_value_error: JsValue = js_error.into();
+        let dom_error: DomError = js_value_error.into();
+        match dom_error {
+            DomError::JsTypeError { message } => assert_eq!(message, "test type error"),
+            _ => panic!("Incorrect DomError variant for TypeError JsValue"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_dom_error_from_js_value_syntax_error() {
+        let js_error = js_sys::SyntaxError::new("test syntax error");
+        let js_value_error: JsValue = js_error.into();
+        let dom_error: DomError = js_value_error.into();
+        match dom_error {
+            DomError::JsSyntaxError { message } => assert_eq!(message, "test syntax error"),
+            _ => panic!("Incorrect DomError variant for SyntaxError JsValue"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_dom_error_from_js_value_reference_error() {
+        let js_error = js_sys::ReferenceError::new("test reference error");
+        let js_value_error: JsValue = js_error.into();
+        let dom_error: DomError = js_value_error.into();
+        match dom_error {
+            DomError::JsReferenceError { message } => assert_eq!(message, "test reference error"),
+            _ => panic!("Incorrect DomError variant for ReferenceError JsValue"),
         }
     }
 
@@ -768,5 +1062,147 @@ mod tests {
         let result = wait_for_element("css:#wait-default-timeout", None).await; // Uses default timeout
         assert!(result.is_ok(), "Element should be found with default timeout: {:?}", result.err());
         cleanup_element(el);
+    }
+
+    // Tests for is_visible
+    #[wasm_bindgen_test]
+    fn test_is_visible_standard_element() {
+        let (_window, document) = get_window_document().unwrap();
+        let el = setup_element(&document, "visible-el", "div", Some(vec![("style", "width: 10px; height: 10px; background: blue;")]));
+        assert_eq!(is_visible("css:#visible-el").unwrap(), true, "Standard visible element reported as not visible");
+        cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_display_none() {
+        let (_window, document) = get_window_document().unwrap();
+        let el = setup_element(&document, "display-none-el", "div", Some(vec![("style", "display: none;")]));
+        assert_eq!(is_visible("css:#display-none-el").unwrap(), false, "Element with display:none reported as visible");
+        cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_visibility_hidden() {
+        let (_window, document) = get_window_document().unwrap();
+        let el = setup_element(&document, "visibility-hidden-el", "div", Some(vec![("style", "visibility: hidden; width: 10px; height: 10px;")]));
+        assert_eq!(is_visible("css:#visibility-hidden-el").unwrap(), false, "Element with visibility:hidden reported as visible");
+        cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_zero_dimensions() {
+        let (_window, document) = get_window_document().unwrap();
+        let el = setup_element(&document, "zero-dim-el", "div", Some(vec![("style", "width: 0; height: 0;")]));
+        assert_eq!(is_visible("css:#zero-dim-el").unwrap(), false, "Element with zero dimensions reported as visible");
+        cleanup_element(el);
+
+        let el2 = setup_element(&document, "zero-width-el", "div", Some(vec![("style", "width: 0; height: 10px;")]));
+        assert_eq!(is_visible("css:#zero-width-el").unwrap(), false, "Element with zero width reported as visible");
+        cleanup_element(el2);
+
+        let el3 = setup_element(&document, "zero-height-el", "div", Some(vec![("style", "width: 10px; height: 0;")]));
+        assert_eq!(is_visible("css:#zero-height-el").unwrap(), false, "Element with zero height reported as visible");
+        cleanup_element(el3);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_opacity_zero_positive_dimensions() {
+        let (_window, document) = get_window_document().unwrap();
+        let el = setup_element(&document, "opacity-zero-pos-dim-el", "div", Some(vec![("style", "width: 10px; height: 10px; opacity: 0;")]));
+        // Element is in layout, occupies space, but is not visible to human eye.
+        // Current `is_visible` logic considers this visible because rect.width/height > 0 and display/visibility are normal.
+        // Opacity check is only triggered if width/height is also zero.
+        assert_eq!(is_visible("css:#opacity-zero-pos-dim-el").unwrap(), true, "Element with opacity:0 but positive dimensions should be true by current logic");
+        cleanup_element(el);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_zero_dimensions_and_opacity_zero() {
+        let (_window, document) = get_window_document().unwrap();
+        let el_zero_dim_opacity_zero = setup_element(&document, "opacity-zero-dim-zero-el", "div", Some(vec![("style", "width: 0px; height: 0px; opacity: 0;")]));
+        assert_eq!(is_visible("css:#opacity-zero-dim-zero-el").unwrap(), false, "Element with opacity:0 and zero dimensions reported as visible");
+        cleanup_element(el_zero_dim_opacity_zero);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_child_of_display_none_parent() {
+        let (_window, document) = get_window_document().unwrap();
+        let parent = setup_element(&document, "parent-display-none", "div", Some(vec![("style", "display: none;")]));
+        let child = document.create_element("div").unwrap();
+        child.set_id("child-of-display-none");
+        child.set_attribute("style", "width: 10px; height: 10px;").unwrap();
+        parent.append_child(&child).unwrap();
+
+        // The child's own computed style for "display" might not be "none" (it's "block" by default for a div),
+        // but get_bounding_client_rect() should return all zeros because the parent is not rendered.
+        // Our current `is_visible` logic relies on `get_computed_style` of the element itself.
+        // If parent is display:none, child's get_bounding_client_rect() will have 0 width/height.
+        assert_eq!(is_visible("css:#child-of-display-none").unwrap(), false, "Child of display:none parent reported as visible");
+        cleanup_element(parent); // Child is removed with parent
+    }
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_child_of_visibility_hidden_parent() {
+        let (_window, document) = get_window_document().unwrap();
+        let parent = setup_element(&document, "parent-visibility-hidden", "div", Some(vec![("style", "visibility: hidden; width: 20px; height: 20px;")]));
+        let child = document.create_element("div").unwrap();
+        child.set_id("child-of-visibility-hidden");
+        child.set_attribute("style", "width: 10px; height: 10px; background: green;").unwrap(); // Child itself is visibility: visible by default
+        parent.append_child(&child).unwrap();
+
+        // If parent is visibility:hidden, child (even if visibility:visible) is not visible.
+        // The computed style for the child's 'visibility' should be 'hidden' due to inheritance.
+        assert_eq!(is_visible("css:#child-of-visibility-hidden").unwrap(), false, "Child of visibility:hidden parent reported as visible");
+        cleanup_element(parent);
+    }
+
+
+    #[wasm_bindgen_test]
+    fn test_is_visible_no_element() {
+        let result = is_visible("css:#nonexistent-visible-check");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DomError::ElementNotFound { selector, .. } => assert_eq!(selector, "css:#nonexistent-visible-check"),
+            other => panic!("Expected ElementNotFound, got {:?}", other),
+        }
+    }
+
+    // Tests for scroll_to
+    #[wasm_bindgen_test]
+    fn test_scroll_to_existing_element() {
+        let (_window, document) = get_window_document().unwrap();
+        // Make the body scrollable and add an element at the bottom
+        document.body().unwrap().set_attribute("style", "height: 2000px;").unwrap();
+        let el = document.create_element("div").unwrap();
+        el.set_id("scroll-target");
+        el.set_inner_html("Scroll To Me");
+        el.set_attribute("style", "margin-top: 1800px; height: 50px; background: lightblue;").unwrap();
+        document.body().unwrap().append_child(&el).unwrap();
+
+        let initial_scroll_y = web_sys::window().unwrap().scroll_y().unwrap_or(0.0);
+        assert_eq!(initial_scroll_y, 0.0, "Initial scroll Y should be 0");
+
+        let result = scroll_to("css:#scroll-target");
+        assert!(result.is_ok(), "scroll_to failed: {:?}", result.err());
+
+        let final_scroll_y = web_sys::window().unwrap().scroll_y().unwrap_or(0.0);
+        // Exact scroll position can be tricky due to browser differences/layout,
+        // but it should definitely be greater than 0 and likely close to the element's offset.
+        assert!(final_scroll_y > 1500.0, "Final scroll Y ({}) should be significantly greater after scroll_to", final_scroll_y);
+
+        // Cleanup
+        document.body().unwrap().remove_attribute("style").unwrap();
+        cleanup_element(el);
+        web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0); // Reset scroll
+    }
+
+    #[wasm_bindgen_test]
+    fn test_scroll_to_no_element() {
+        let result = scroll_to("css:#nonexistent-scroll-target");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            DomError::ElementNotFound { selector, .. } => assert_eq!(selector, "css:#nonexistent-scroll-target"),
+            other => panic!("Expected ElementNotFound, got {:?}", other),
+        }
     }
 }

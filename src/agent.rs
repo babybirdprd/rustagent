@@ -4,22 +4,30 @@ use web_sys::console; // For logging unexpected parsing issues
 use serde::Deserialize; // For JSON deserialization
 
 // 1. Define AgentRole Enum
+/// Defines the specialized roles an `Agent` can take on.
+/// This helps in selecting the most appropriate agent for a given task,
+/// especially when the task is not a direct DOM command and requires LLM interpretation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentRole {
+    /// Specializes in navigation tasks (e.g., going to URLs).
     Navigator,
+    /// Specializes in filling out forms (e.g., typing text, selecting options).
     FormFiller,
+    /// A general-purpose agent that can handle a variety of tasks or when a more specific agent isn't available/matched.
     Generic,
 }
 
 // 2. Update Agent Struct
+/// Represents an agent with a specific ID and role.
 pub struct Agent {
     id: u32,
-    role: AgentRole, // Changed from String to AgentRole
+    role: AgentRole,
 }
 
-// Define DomCommandAction enum and DomCommand struct
-#[derive(Debug, Clone, PartialEq, Deserialize)] // Added Deserialize
-#[serde(rename_all = "UPPERCASE")] // To match action strings like "CLICK"
+/// Defines the set of actions that can be performed on DOM elements.
+/// These are used for both direct command parsing and for interpreting LLM responses.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "UPPERCASE")] // Ensures JSON deserialization matches uppercase action strings (e.g., "CLICK").
 enum DomCommandAction {
     Click,
     Type,
@@ -32,27 +40,42 @@ enum DomCommandAction {
     GetUrl,
     ElementExists,
     WaitForElement,
+    IsVisible,
+    ScrollTo,
 }
 
-#[derive(Debug, Clone)] // DomCommand remains for internal use
+/// Represents a parsed and validated command ready for execution by the agent.
+/// This struct is used internally after parsing a raw task string or an LLM command request.
+#[derive(Debug, Clone)]
 struct DomCommand {
+    /// The specific DOM action to perform.
     action: DomCommandAction,
+    /// The CSS selector or XPath expression targeting the DOM element(s).
     selector: String,
-    value: Option<String>, // For TYPE, SETATTRIBUTE, SELECTOPTION
-    attribute_name: Option<String>, // For GETATTRIBUTE, SETATTRIBUTE
-}
-
-// Struct for deserializing LLM's JSON command
-#[derive(Deserialize, Debug)]
-struct LlmDomCommandRequest {
-    action: String, // Keep as String for flexibility, then map to DomCommandAction
-    selector: String,
+    /// An optional value associated with the action (e.g., text for TYPE, value for SELECTOPTION).
     value: Option<String>,
+    /// An optional attribute name (e.g., for GETATTRIBUTE, SETATTRIBUTE).
     attribute_name: Option<String>,
 }
 
-// Implement parse_dom_command function
-const AVAILABLE_DOM_COMMANDS: [&str; 11] = [ // This could be Vec<String> or other types too
+/// Represents a command request as deserialized from an LLM's JSON output.
+/// This struct is used for initial parsing of potentially less structured LLM responses.
+#[derive(Deserialize, Debug)]
+struct LlmDomCommandRequest {
+    /// The action to perform, as a string (e.g., "CLICK", "TYPE").
+    action: String,
+    /// The CSS selector or XPath expression.
+    selector: String,
+    /// An optional value for the command.
+    value: Option<String>,
+    /// An optional attribute name for the command.
+    attribute_name: Option<String>,
+}
+
+/// A list of available direct DOM command strings with their expected arguments.
+/// This is used for generating prompts for the LLM and for user reference.
+// Array size should be updated if new commands are added.
+const AVAILABLE_DOM_COMMANDS: [&str; 13] = [
     "CLICK <selector>",
     "TYPE <selector> <text>",
     "READ <selector>",
@@ -64,16 +87,38 @@ const AVAILABLE_DOM_COMMANDS: [&str; 11] = [ // This could be Vec<String> or oth
     "GET_URL",
     "ELEMENT_EXISTS <selector>",
     "WAIT_FOR_ELEMENT <selector> [timeout_ms]",
+    "IS_VISIBLE <selector>",
+    "SCROLL_TO <selector>",
 ];
 
-// Helper function to generate the structured LLM prompt
+/// Generates a structured prompt for the LLM, instructing it on how to respond
+/// with either a JSON array of DOM commands or a natural language answer.
+///
+/// The prompt includes:
+/// - The agent's persona (ID and role).
+/// - The user's original task.
+/// - Instructions for formatting commands as JSON objects.
+/// - A list of available actions and their specific JSON schemas.
+/// - An example of a valid JSON array response.
+/// - Guidance on when to respond with natural language instead of commands.
+///
+/// # Arguments
+/// * `agent_id`: The ID of the agent making the request.
+/// * `agent_role`: The role of the agent.
+/// * `original_task`: The user's task string.
+/// * `_available_commands_list`: (Currently unused, but kept for potential future use where
+///   the list of commands might be dynamically passed or filtered).
+///
+/// # Returns
+/// A formatted string to be used as the prompt for the LLM.
 fn generate_structured_llm_prompt(
     agent_id: u32,
     agent_role: &AgentRole,
     original_task: &str,
-    _available_commands_list: &[&str] // Parameter kept for signature compatibility, but not used directly in new prompt
+    _available_commands_list: &[&str] // Parameter kept for signature compatibility
 ) -> String {
-    // Define the available actions from DomCommandAction enum
+    // The list of actions should ideally be derived directly from DomCommandAction variants
+    // or a single source of truth to avoid discrepancies. For now, it's manually listed.
     let actions = [
         "CLICK",
         "TYPE",
@@ -86,6 +131,8 @@ fn generate_structured_llm_prompt(
         "GET_URL",
         "ELEMENT_EXISTS",
         "WAIT_FOR_ELEMENT",
+        "IS_VISIBLE",
+        "SCROLL_TO",
     ];
     let action_list_str = actions.join(", ");
 
@@ -109,7 +156,9 @@ fn generate_structured_llm_prompt(
         - Get All Attributes: {{\"action\": \"GET_ALL_ATTRIBUTES\", \"selector\": \"<selector>\", \"attribute_name\": \"<attr_name>\"}} (returns a JSON array of attribute values for all matching elements)\n\
         - Get URL: {{\"action\": \"GET_URL\"}} (gets the current page URL)\n\
         - Element Exists: {{\"action\": \"ELEMENT_EXISTS\", \"selector\": \"<selector>\"}} (checks if an element exists on the page, returns true or false)\n\
-        - Wait For Element: {{\"action\": \"WAIT_FOR_ELEMENT\", \"selector\": \"<selector>\", \"value\": <timeout_in_milliseconds_optional>}} (waits for an element to exist, returns nothing on success or error on timeout/failure)\n\n\
+        - Wait For Element: {{\"action\": \"WAIT_FOR_ELEMENT\", \"selector\": \"<selector>\", \"value\": <timeout_in_milliseconds_optional>}} (waits for an element to exist, returns nothing on success or error on timeout/failure)\n\
+        - Is Visible: {{\"action\": \"IS_VISIBLE\", \"selector\": \"<selector>\"}} (checks if an element is currently visible on the page, returns true or false)\n\
+        - Scroll To: {{\"action\": \"SCROLL_TO\", \"selector\": \"<selector>\"}} (scrolls the page to make the element visible)\n\n\
         Example of a JSON array response:\n\
         [\n\
           {{\"action\": \"TYPE\", \"selector\": \"css:#username\", \"value\": \"testuser\"}},\n\
@@ -121,6 +170,22 @@ fn generate_structured_llm_prompt(
     )
 }
 
+/// Parses a raw task string into a `DomCommand` if it matches a known direct command format.
+///
+/// This function checks the first word of the task string against a list of known
+/// command keywords (e.g., "CLICK", "TYPE"). If a keyword is matched, it attempts
+/// to parse the rest of the string (`args_str`) according to that command's expected arguments.
+///
+/// # Arguments
+/// * `task`: The raw task string input by the user or from a task list.
+///
+/// # Returns
+/// * `Some(DomCommand)` if the task string successfully parses into a valid direct DOM command.
+///   The `DomCommand` will contain the specific `DomCommandAction` and any parsed arguments
+///   (selector, value, attribute_name).
+/// * `None` if the task string does not match any known direct command format, or if the
+///   arguments are invalid for the matched command. This indicates that the task
+///   should likely be handled by the LLM fallback logic.
 fn parse_dom_command(task: &str) -> Option<DomCommand> {
     let parts: Vec<&str> = task.splitn(2, ' ').collect();
     let command_str = parts.get(0).unwrap_or(&"").to_uppercase();
@@ -251,6 +316,24 @@ fn parse_dom_command(task: &str) -> Option<DomCommand> {
                 attribute_name: None,
             })
         }
+        "IS_VISIBLE" => {
+            if args_str.is_empty() { return None; }
+            Some(DomCommand {
+                action: DomCommandAction::IsVisible,
+                selector: args_str.to_string(),
+                value: None,
+                attribute_name: None,
+            })
+        }
+        "SCROLL_TO" => {
+            if args_str.is_empty() { return None; }
+            Some(DomCommand {
+                action: DomCommandAction::ScrollTo,
+                selector: args_str.to_string(),
+                value: None,
+                attribute_name: None,
+            })
+        }
         _ => None,
     }
 }
@@ -260,18 +343,43 @@ pub struct AgentSystem {
 }
 
 impl AgentSystem {
-    // 3. Update AgentSystem::new()
+    /// Creates a new `AgentSystem` and initializes a predefined set of agents
+    /// with different roles (Navigator, FormFiller, Generic).
     pub fn new() -> Self {
         let mut agents = Vec::new();
+        // Agent ID 1: Navigator - specialized for URL navigation tasks.
         agents.push(Agent { id: 1, role: AgentRole::Navigator });
+        // Agent ID 2: FormFiller - specialized for form interaction tasks.
         agents.push(Agent { id: 2, role: AgentRole::FormFiller });
-        agents.push(Agent { id: 3, role: AgentRole::Generic }); // Added a Generic agent
+        // Agent ID 3: Generic - handles tasks not fitting other specializations or as a fallback.
+        agents.push(Agent { id: 3, role: AgentRole::Generic });
         AgentSystem { agents }
     }
 
-    // run_task is now async and returns Result<String, String>
+    /// Runs a given task, either by parsing it as a direct DOM command or by
+    /// sending it to an LLM for interpretation into DOM commands or a natural language response.
+    ///
+    /// # Arguments
+    /// * `task`: The task string to execute. This can be a direct DOM command
+    ///   (e.g., "CLICK css:#submit") or a natural language query (e.g., "click the submit button").
+    /// * `api_key`: API key for the LLM service.
+    /// * `api_url`: URL for the LLM service.
+    /// * `model_name`: Name of the LLM model to use.
+    ///
+    /// # Returns
+    /// * `Ok(String)`:
+    ///   - If a direct DOM command is executed successfully, a success message string.
+    ///   - If the LLM returns a natural language response, that response string.
+    ///   - If the LLM returns a JSON array of commands, a JSON string representing `Vec<Result<String, String>>`
+    ///     of individual command execution results.
+    /// * `Err(String)`:
+    ///   - If a direct DOM command fails, an error message string.
+    ///   - If the LLM call itself fails (e.g., network error, API error).
+    ///   - If serializing LLM command results fails.
     pub async fn run_task(&self, task: &str, api_key: &str, api_url: &str, model_name: &str) -> Result<String, String> {
         // 1. Agent Selection Logic
+        // Selects an agent based on keywords in the task string. This is a simple heuristic.
+        // More sophisticated agent selection might involve LLM-based routing or a dedicated router agent.
         let task_lowercase = task.to_lowercase();
         let mut selected_agent = self.agents.iter().find(|a| a.role == AgentRole::Generic)
             .unwrap_or_else(|| &self.agents[0]); // Default to Generic or first agent
@@ -286,15 +394,18 @@ impl AgentSystem {
                 selected_agent = agent;
             }
         }
-        // Add more rules here if other roles are introduced
+        // Add more rules here if other roles are introduced (e.g., specific keywords for other agent types).
 
         console::log_1(&format!("Task received: '{}'. Selected Agent ID: {}, Role: {:?}", task, selected_agent.id, selected_agent.role).into());
 
         // 2. Task Execution with Selected Agent
+        // First, attempt to parse the task as a direct DOM command.
         if let Some(dom_command) = parse_dom_command(task) {
-            // Execute DOM command
-            console::log_1(&format!("Agent {} ({:?}): Executing DOM command: {:?}", selected_agent.id, selected_agent.role, dom_command).into());
+            // If parsing is successful, execute the DOM command directly.
+            console::log_1(&format!("Agent {} ({:?}): Executing direct DOM command: {:?}", selected_agent.id, selected_agent.role, dom_command).into());
             match dom_command.action {
+                // Each DomCommandAction variant has a corresponding block to call the appropriate dom_utils function.
+                // Successes return Ok(formatted_message), errors return Err(formatted_error_message).
                 DomCommandAction::Click => {
                     match click_element(&dom_command.selector) {
                         Ok(_) => Ok(format!("Agent {} ({:?}): Successfully clicked element with selector: '{}'", selected_agent.id, selected_agent.role, dom_command.selector)),
@@ -368,11 +479,24 @@ impl AgentSystem {
                         Err(e) => Err(format!("Agent {} ({:?}): {}", selected_agent.id, selected_agent.role, e.to_string())),
                     }
                 }
+                DomCommandAction::IsVisible => {
+                    match dom_utils::is_visible(&dom_command.selector) {
+                        Ok(visible) => Ok(format!("Agent {} ({:?}): Element '{}' is visible: {}", selected_agent.id, selected_agent.role, dom_command.selector, visible)),
+                        Err(e) => Err(format!("Agent {} ({:?}): Error checking visibility for element '{}': {}", selected_agent.id, selected_agent.role, dom_command.selector, e.to_string())),
+                    }
+                }
+                DomCommandAction::ScrollTo => {
+                    match dom_utils::scroll_to(&dom_command.selector) {
+                        Ok(_) => Ok(format!("Agent {} ({:?}): Successfully scrolled to element '{}'", selected_agent.id, selected_agent.role, dom_command.selector)),
+                        Err(e) => Err(format!("Agent {} ({:?}): Error scrolling to element '{}': {}", selected_agent.id, selected_agent.role, dom_command.selector, e.to_string())),
+                    }
+                }
             }
         } else {
-            // Fallback to LLM call logic
-            console::log_1(&format!("Agent {} ({:?}): No DOM command parsed or task is not a DOM command. Defaulting to LLM for task: {}", selected_agent.id, selected_agent.role, task).into());
+            // If the task is not a direct DOM command, fallback to LLM interpretation.
+            console::log_1(&format!("Agent {} ({:?}): No direct DOM command parsed. Defaulting to LLM for task: {}", selected_agent.id, selected_agent.role, task).into());
             
+            // Generate a detailed prompt for the LLM.
             let prompt_for_llm = generate_structured_llm_prompt(
                 selected_agent.id, 
                 &selected_agent.role, 
@@ -382,22 +506,26 @@ impl AgentSystem {
             
             match call_llm_async(prompt_for_llm, api_key.to_string(), api_url.to_string(), model_name.to_string()).await {
                 Ok(llm_response) => {
-                    // Attempt to parse the llm_response as a JSON array of LlmDomCommandRequest
-                    match serde_json::from_str::<Vec<LlmDomCommandRequest>>(&llm_response) {
-                        Ok(llm_commands) => {
-                            let mut results = Vec::new();
-                            if llm_commands.is_empty() {
-                                // If LLM returns empty array, treat as natural language response or a specific non-action.
-                                console::log_1(&format!("Agent {} ({:?}): LLM returned an empty command array. Treating as natural language response: {}", selected_agent.id, selected_agent.role, llm_response).into());
-                                return Ok(format!("Agent {} ({:?}) completed task via LLM: {}", selected_agent.id, selected_agent.role, llm_response));
-                            }
+                    // Attempt to parse the llm_response as a serde_json::Value first
+                    match serde_json::from_str::<serde_json::Value>(&llm_response) {
+                        Ok(json_value) => {
+                            if json_value.is_array() {
+                                let mut results = Vec::new();
+                                let command_array = json_value.as_array().unwrap(); // Safe unwrap as we checked is_array()
 
-                            console::log_1(&format!("Agent {} ({:?}): LLM returned {} commands. Executing...", selected_agent.id, selected_agent.role, llm_commands.len()).into());
+                                if command_array.is_empty() {
+                                    console::log_1(&format!("Agent {} ({:?}): LLM returned an empty command array. Treating as natural language response: {}", selected_agent.id, selected_agent.role, llm_response).into());
+                                    return Ok(format!("Agent {} ({:?}) completed task via LLM: {}", selected_agent.id, selected_agent.role, llm_response));
+                                }
 
-                            for llm_cmd_req in llm_commands {
-                                // Validate and convert LlmDomCommandRequest to DomCommand
-                                let action_upper = llm_cmd_req.action.to_uppercase();
-                                let dom_action = match action_upper.as_str() {
+                                console::log_1(&format!("Agent {} ({:?}): LLM returned {} commands. Executing...", selected_agent.id, selected_agent.role, command_array.len()).into());
+
+                                for (index, cmd_json_obj) in command_array.iter().enumerate() {
+                                    match serde_json::from_value::<LlmDomCommandRequest>(cmd_json_obj.clone()) {
+                                        Ok(llm_cmd_req) => {
+                                            // Successfully parsed LlmDomCommandRequest, proceed with validation and execution
+                                            let action_upper = llm_cmd_req.action.to_uppercase();
+                                            let dom_action = match action_upper.as_str() {
                                     "CLICK" => DomCommandAction::Click,
                                     "TYPE" => DomCommandAction::Type,
                                     "READ" => DomCommandAction::Read,
@@ -409,6 +537,8 @@ impl AgentSystem {
                                     "GET_URL" => DomCommandAction::GetUrl,
                                     "ELEMENT_EXISTS" => DomCommandAction::ElementExists,
                                     "WAIT_FOR_ELEMENT" => DomCommandAction::WaitForElement,
+                                    "IS_VISIBLE" => DomCommandAction::IsVisible,
+                                    "SCROLL_TO" => DomCommandAction::ScrollTo,
                                     _ => {
                                         let err_msg = format!("Invalid action '{}' from LLM.", llm_cmd_req.action);
                                         console::log_1(&err_msg.clone().into());
@@ -449,86 +579,162 @@ impl AgentSystem {
                                     attribute_name: llm_cmd_req.attribute_name,
                                 };
 
-                                // Execute the dom_command
-                                let cmd_result = match &dom_command.action {
-                                    DomCommandAction::Click => match click_element(&dom_command.selector) {
-                                        Ok(_) => Ok(format!("Successfully clicked element with selector: '{}'", dom_command.selector)),
-                                        Err(e) => Err(format!("Error clicking element: {}", e.to_string())),
-                                    },
-                                    DomCommandAction::Type => {
-                                        let text_to_type = dom_command.value.as_deref().unwrap_or_default();
-                                        match type_in_element(&dom_command.selector, text_to_type) {
-                                            Ok(_) => Ok(format!("Successfully typed '{}' in element with selector: '{}'", text_to_type, dom_command.selector)),
-                                            Err(e) => Err(format!("Error typing in element: {}", e.to_string())),
+                                                // ... (rest of the dom_action match remains the same)
+                                                Click => DomCommandAction::Click,
+                                                "TYPE" => DomCommandAction::Type,
+                                                "READ" => DomCommandAction::Read,
+                                                "GETVALUE" => DomCommandAction::GetValue,
+                                                "GETATTRIBUTE" => DomCommandAction::GetAttribute,
+                                                "SETATTRIBUTE" => DomCommandAction::SetAttribute,
+                                                "SELECTOPTION" => DomCommandAction::SelectOption,
+                                                "GET_ALL_ATTRIBUTES" => DomCommandAction::GetAllAttributes,
+                                                "GET_URL" => DomCommandAction::GetUrl,
+                                                "ELEMENT_EXISTS" => DomCommandAction::ElementExists,
+                                                "WAIT_FOR_ELEMENT" => DomCommandAction::WaitForElement,
+                                                "IS_VISIBLE" => DomCommandAction::IsVisible,
+                                                "SCROLL_TO" => DomCommandAction::ScrollTo,
+                                                _ => {
+                                                    let err_msg = format!("Invalid action '{}' from LLM.", llm_cmd_req.action);
+                                                    console::log_1(&err_msg.clone().into());
+                                                    results.push(Err(err_msg));
+                                                    continue; // Skip this invalid command
+                                                }
+                                            };
+
+                                            // Validate required fields based on action
+                                            match dom_action {
+                                                DomCommandAction::Type | DomCommandAction::SetAttribute | DomCommandAction::SelectOption => {
+                                                    if llm_cmd_req.value.is_none() {
+                                                        let err_msg = format!("Action {:?} requires 'value'. Command: {:?}", dom_action, llm_cmd_req);
+                                                        console::log_1(&err_msg.clone().into());
+                                                        results.push(Err(err_msg));
+                                                        continue;
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                            match dom_action {
+                                                DomCommandAction::GetAttribute | DomCommandAction::SetAttribute | DomCommandAction::GetAllAttributes => {
+                                                    if llm_cmd_req.attribute_name.is_none() {
+                                                        let err_msg = format!("Action {:?} requires 'attribute_name'. Command: {:?}", dom_action, llm_cmd_req);
+                                                        console::log_1(&err_msg.clone().into());
+                                                        results.push(Err(err_msg));
+                                                        continue;
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+
+                                            let dom_command = DomCommand {
+                                                action: dom_action,
+                                                selector: llm_cmd_req.selector,
+                                                value: llm_cmd_req.value,
+                                                attribute_name: llm_cmd_req.attribute_name,
+                                            };
+
+                                            let cmd_representation = format!("Action: {:?}, Selector: '{}', Value: {:?}, AttrName: {:?}",
+                                                dom_command.action, dom_command.selector, dom_command.value, dom_command.attribute_name);
+
+                                            let cmd_result = match &dom_command.action {
+                                                DomCommandAction::Click => match click_element(&dom_command.selector) {
+                                                    Ok(_) => Ok(format!("Successfully clicked element with selector: '{}'", dom_command.selector)),
+                                                    Err(e) => Err(format!("Command {} ('{}') failed: Error clicking element: {}", index, cmd_representation, e.to_string())),
+                                                },
+                                                DomCommandAction::Type => {
+                                                    let text_to_type = dom_command.value.as_deref().unwrap_or_default();
+                                                    match type_in_element(&dom_command.selector, text_to_type) {
+                                                        Ok(_) => Ok(format!("Successfully typed '{}' in element with selector: '{}'", text_to_type, dom_command.selector)),
+                                                        Err(e) => Err(format!("Command {} ('{}') failed: Error typing in element: {}", index, cmd_representation, e.to_string())),
+                                                    }
+                                                }
+                                                DomCommandAction::Read => match get_element_text(&dom_command.selector) {
+                                                    Ok(text) => Ok(format!("Text from element '{}': {}", dom_command.selector, text)),
+                                                    Err(e) => Err(format!("Command {} ('{}') failed: Error reading text from element: {}", index, cmd_representation, e.to_string())),
+                                                },
+                                                DomCommandAction::GetValue => match get_element_value(&dom_command.selector) {
+                                                    Ok(value) => Ok(format!("Value from element '{}': {}", dom_command.selector, value)),
+                                                    Err(e) => Err(format!("Command {} ('{}') failed: Error getting value from element: {}", index, cmd_representation, e.to_string())),
+                                                },
+                                                DomCommandAction::GetAttribute => {
+                                                    let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
+                                                    match get_element_attribute(&dom_command.selector, attribute_name) {
+                                                        Ok(value) => Ok(format!("Attribute '{}' from element '{}': {}", attribute_name, dom_command.selector, value)),
+                                                        Err(e) => Err(format!("Command {} ('{}') failed: Error getting attribute: {}", index, cmd_representation, e.to_string())),
+                                                    }
+                                                }
+                                                DomCommandAction::SetAttribute => {
+                                                    let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
+                                                    let attribute_value = dom_command.value.as_deref().unwrap_or_default();
+                                                    match set_element_attribute(&dom_command.selector, attribute_name, attribute_value) {
+                                                        Ok(_) => Ok(format!("Successfully set attribute '{}' to '{}' for element '{}'", attribute_name, attribute_value, dom_command.selector)),
+                                                        Err(e) => Err(format!("Command {} ('{}') failed: Error setting attribute: {}", index, cmd_representation, e.to_string())),
+                                                    }
+                                                }
+                                                DomCommandAction::SelectOption => {
+                                                    let value = dom_command.value.as_deref().unwrap_or_default();
+                                                    match select_dropdown_option(&dom_command.selector, value) {
+                                                        Ok(_) => Ok(format!("Successfully selected option '{}' for dropdown '{}'", value, dom_command.selector)),
+                                                        Err(e) => Err(format!("Command {} ('{}') failed: Error selecting option: {}", index, cmd_representation, e.to_string())),
+                                                    }
+                                                }
+                                                DomCommandAction::GetAllAttributes => {
+                                                    let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
+                                                    match dom_utils::get_all_elements_attributes(&dom_command.selector, attribute_name) {
+                                                        Ok(json_string) => Ok(format!("Successfully retrieved attributes '{}' for elements matching selector '{}': {}", attribute_name, dom_command.selector, json_string)),
+                                                        Err(e) => Err(format!("Command {} ('{}') failed: Error getting all attributes: {}", index, cmd_representation, e.to_string())),
+                                                    }
+                                                }
+                                                DomCommandAction::GetUrl => match dom_utils::get_current_url() {
+                                                    Ok(url) => Ok(format!("Current URL is: {}", url)),
+                                                    Err(e) => Err(format!("Command {} ('{}') failed: {}", index, cmd_representation, e.to_string())),
+                                                },
+                                                DomCommandAction::ElementExists => match dom_utils::element_exists(&dom_command.selector) {
+                                                    Ok(exists) => Ok(format!("Element '{}' exists: {}", dom_command.selector, exists)),
+                                                    Err(e) => Err(format!("Command {} ('{}') failed: {}", index, cmd_representation, e.to_string())),
+                                                },
+                                                DomCommandAction::WaitForElement => {
+                                                    let timeout_ms = dom_command.value.as_ref().and_then(|s| s.parse::<u32>().ok());
+                                                    match dom_utils::wait_for_element(&dom_command.selector, timeout_ms).await {
+                                                        Ok(()) => Ok(format!("Element '{}' appeared.", dom_command.selector)),
+                                                        Err(e) => Err(format!("Command {} ('{}') failed: {}", index, cmd_representation, e.to_string())),
+                                                    }
+                                                }
+                                                DomCommandAction::IsVisible => match dom_utils::is_visible(&dom_command.selector) {
+                                                    Ok(visible) => Ok(format!("Element '{}' is visible: {}", dom_command.selector, visible)),
+                                                    Err(e) => Err(format!("Command {} ('{}') failed: Error checking visibility: {}", index, cmd_representation, e.to_string())),
+                                                },
+                                                DomCommandAction::ScrollTo => match dom_utils::scroll_to(&dom_command.selector) {
+                                                    Ok(_) => Ok(format!("Successfully scrolled to element '{}'", dom_command.selector)),
+                                                    Err(e) => Err(format!("Command {} ('{}') failed: Error scrolling to element: {}", index, cmd_representation, e.to_string())),
+                                                },
+                                            };
+                                            results.push(cmd_result);
+                                        }
+                                        Err(e) => {
+                                            // Failed to parse LlmDomCommandRequest from this specific json_object
+                                            let err_msg = format!("Command at index {} was malformed and could not be parsed: {}. Object: {}", index, e.to_string(), cmd_json_obj.to_string());
+                                            console::warn_1(&err_msg.clone().into());
+                                            results.push(Err(err_msg));
                                         }
                                     }
-                                    DomCommandAction::Read => match get_element_text(&dom_command.selector) {
-                                        Ok(text) => Ok(format!("Text from element '{}': {}", dom_command.selector, text)),
-                                        Err(e) => Err(format!("Error reading text from element: {}", e.to_string())),
-                                    },
-                                    DomCommandAction::GetValue => match get_element_value(&dom_command.selector) {
-                                        Ok(value) => Ok(format!("Value from element '{}': {}", dom_command.selector, value)),
-                                        Err(e) => Err(format!("Error getting value from element: {}", e.to_string())),
-                                    },
-                                    DomCommandAction::GetAttribute => {
-                                        let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
-                                        match get_element_attribute(&dom_command.selector, attribute_name) {
-                                            Ok(value) => Ok(format!("Attribute '{}' from element '{}': {}", attribute_name, dom_command.selector, value)),
-                                            Err(e) => Err(format!("Error getting attribute: {}", e.to_string())),
-                                        }
-                                    }
-                                    DomCommandAction::SetAttribute => {
-                                        let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
-                                        let attribute_value = dom_command.value.as_deref().unwrap_or_default();
-                                        match set_element_attribute(&dom_command.selector, attribute_name, attribute_value) {
-                                            Ok(_) => Ok(format!("Successfully set attribute '{}' to '{}' for element '{}'", attribute_name, attribute_value, dom_command.selector)),
-                                            Err(e) => Err(format!("Error setting attribute: {}", e.to_string())),
-                                        }
-                                    }
-                                    DomCommandAction::SelectOption => {
-                                        let value = dom_command.value.as_deref().unwrap_or_default();
-                                        match select_dropdown_option(&dom_command.selector, value) {
-                                            Ok(_) => Ok(format!("Successfully selected option '{}' for dropdown '{}'", value, dom_command.selector)),
-                                            Err(e) => Err(format!("Error selecting option: {}", e.to_string())),
-                                        }
-                                    }
-                                    DomCommandAction::GetAllAttributes => {
-                                        let attribute_name = dom_command.attribute_name.as_deref().unwrap_or_default();
-                                        match dom_utils::get_all_elements_attributes(&dom_command.selector, attribute_name) {
-                                            Ok(json_string) => Ok(format!("Successfully retrieved attributes '{}' for elements matching selector '{}': {}", attribute_name, dom_command.selector, json_string)),
-                                            Err(e) => Err(format!("Error getting all attributes: {}", e.to_string())),
-                                        }
-                                    }
-                                    DomCommandAction::GetUrl => match dom_utils::get_current_url() {
-                                        Ok(url) => Ok(format!("Current URL is: {}", url)),
-                                        Err(e) => Err(e.to_string()),
-                                    },
-                                    DomCommandAction::ElementExists => match dom_utils::element_exists(&dom_command.selector) {
-                                        Ok(exists) => Ok(format!("Element '{}' exists: {}", dom_command.selector, exists)),
-                                        Err(e) => Err(e.to_string()),
-                                    },
-                                    DomCommandAction::WaitForElement => {
-                                        let timeout_ms = dom_command.value.as_ref().and_then(|s| s.parse::<u32>().ok());
-                                        match dom_utils::wait_for_element(&dom_command.selector, timeout_ms).await {
-                                            Ok(()) => Ok(format!("Element '{}' appeared.", dom_command.selector)),
-                                            Err(e) => Err(e.to_string()),
-                                        }
-                                    }
-                                };
-                                results.push(cmd_result);
-                            }
-                            // Serialize the results vector into a JSON string
-                            match serde_json::to_string(&results) {
-                                Ok(json_results) => Ok(json_results),
-                                Err(e) => {
-                                    console::log_1(&format!("Error serializing command results: {:?}", e).into());
-                                    Err(format!("Agent {} ({:?}): Error serializing LLM command results: {}", selected_agent.id, selected_agent.role, e.to_string()))
                                 }
+                                // Serialize the results vector into a JSON string
+                                match serde_json::to_string(&results) {
+                                    Ok(json_results) => Ok(json_results),
+                                    Err(e) => {
+                                        console::log_1(&format!("Error serializing command results: {:?}", e).into());
+                                        Err(format!("Agent {} ({:?}): Error serializing LLM command results: {}", selected_agent.id, selected_agent.role, e.to_string()))
+                                    }
+                                }
+                            } else {
+                                // LLM response was valid JSON but not an array, treat as plain text
+                                console::log_1(&format!("Agent {} ({:?}): LLM response was valid JSON but not an array. Treating as natural language: {}", selected_agent.id, selected_agent.role, llm_response).into());
+                                Ok(format!("Agent {} ({:?}) completed task via LLM: {}", selected_agent.id, selected_agent.role, llm_response))
                             }
                         }
                         Err(e) => {
-                            // JSON parsing failed, treat as plain text response
-                            console::log_1(&format!("Agent {} ({:?}): LLM response was not valid JSON array of commands (Error: {}). Treating as natural language: {}", selected_agent.id, selected_agent.role, e, llm_response).into());
+                            // LLM response was not valid JSON at all, treat as plain text
+                            console::log_1(&format!("Agent {} ({:?}): LLM response was not valid JSON (Error: {}). Treating as natural language: {}", selected_agent.id, selected_agent.role, e, llm_response).into());
                             Ok(format!("Agent {} ({:?}) completed task via LLM: {}", selected_agent.id, selected_agent.role, llm_response))
                         }
                     }
@@ -587,6 +793,21 @@ mod tests {
         assert_eq!(cmd_invalid_timeout.value, None); // Invalid timeout 'abc' results in None
     }
 
+    #[test]
+    fn test_parse_dom_command_is_visible() {
+        let cmd = parse_dom_command("IS_VISIBLE css:#myId").unwrap();
+        assert_eq!(cmd.action, DomCommandAction::IsVisible);
+        assert_eq!(cmd.selector, "css:#myId");
+        assert!(parse_dom_command("IS_VISIBLE").is_none(), "IS_VISIBLE should require a selector");
+    }
+
+    #[test]
+    fn test_parse_dom_command_scroll_to() {
+        let cmd = parse_dom_command("SCROLL_TO css:#myId").unwrap();
+        assert_eq!(cmd.action, DomCommandAction::ScrollTo);
+        assert_eq!(cmd.selector, "css:#myId");
+        assert!(parse_dom_command("SCROLL_TO").is_none(), "SCROLL_TO should require a selector");
+    }
 
     // Use wasm_bindgen_test for async tests
     #[wasm_bindgen_test]
@@ -619,6 +840,14 @@ mod tests {
         // Check for WAIT_FOR_ELEMENT
         assert!(prompt.contains("\"action\": \"WAIT_FOR_ELEMENT\""));
         assert!(prompt.contains("- Wait For Element: {{\"action\": \"WAIT_FOR_ELEMENT\", \"selector\": \"<selector>\", \"value\": <timeout_in_milliseconds_optional>}} (waits for an element to exist, returns nothing on success or error on timeout/failure)"));
+
+        // Check for IS_VISIBLE
+        assert!(prompt.contains("\"action\": \"IS_VISIBLE\""));
+        assert!(prompt.contains("- Is Visible: {{\"action\": \"IS_VISIBLE\", \"selector\": \"<selector>\"}} (checks if an element is currently visible on the page, returns true or false)"));
+
+        // Check for SCROLL_TO
+        assert!(prompt.contains("\"action\": \"SCROLL_TO\""));
+        assert!(prompt.contains("- Scroll To: {{\"action\": \"SCROLL_TO\", \"selector\": \"<selector>\"}} (scrolls the page to make the element visible)"));
     }
 
     #[wasm_bindgen_test]
@@ -732,7 +961,38 @@ mod tests {
         let res_wait_timeout = agent_system.run_task(task_wait_for_timeout, dummy_api_key, dummy_api_url, dummy_model_name).await;
         let err_msg_wait_timeout = res_wait_timeout.unwrap_err();
         assert!(err_msg_wait_timeout.contains("Element 'css:#wait-for-timeout-direct' not found after 100ms timeout"), "Error message mismatch: {}", err_msg_wait_timeout);
-        
+
+        // IS_VISIBLE tests (direct execution)
+        let el_visible = dom_utils::setup_element(&document, "is-visible-direct", "div", Some(vec![("style", "width:10px; height:10px;")]));
+        let task_is_visible_true = "IS_VISIBLE css:#is-visible-direct";
+        let res_is_visible_true = agent_system.run_task(task_is_visible_true, dummy_api_key, dummy_api_url, dummy_model_name).await;
+        assert!(res_is_visible_true.is_ok(), "IS_VISIBLE true case failed: {:?}", res_is_visible_true.err());
+        assert_eq!(res_is_visible_true.unwrap(), "Agent 3 (Generic): Element 'css:#is-visible-direct' is visible: true");
+        dom_utils::cleanup_element(el_visible);
+
+        let el_hidden = dom_utils::setup_element(&document, "is-visible-hidden-direct", "div", Some(vec![("style", "display:none;")]));
+        let task_is_visible_false = "IS_VISIBLE css:#is-visible-hidden-direct";
+        let res_is_visible_false = agent_system.run_task(task_is_visible_false, dummy_api_key, dummy_api_url, dummy_model_name).await;
+        assert!(res_is_visible_false.is_ok(), "IS_VISIBLE false case failed: {:?}", res_is_visible_false.err());
+        assert_eq!(res_is_visible_false.unwrap(), "Agent 3 (Generic): Element 'css:#is-visible-hidden-direct' is visible: false");
+        dom_utils::cleanup_element(el_hidden);
+
+        let task_is_visible_nonexistent = "IS_VISIBLE css:#is-visible-nonexistent-direct";
+        let res_is_visible_nonexistent = agent_system.run_task(task_is_visible_nonexistent, dummy_api_key, dummy_api_url, dummy_model_name).await;
+        assert!(res_is_visible_nonexistent.is_err(), "IS_VISIBLE nonexistent did not fail");
+        assert!(res_is_visible_nonexistent.unwrap_err().contains("ElementNotFound: No element found for selector 'css:#is-visible-nonexistent-direct'"));
+
+        // SCROLL_TO tests (direct execution)
+        document.body().unwrap().set_attribute("style", "height: 2000px;").unwrap();
+        let el_scroll = dom_utils::setup_element(&document, "scroll-to-direct", "div", Some(vec![("style", "margin-top: 1800px; height: 50px;")]));
+        let task_scroll_to = "SCROLL_TO css:#scroll-to-direct";
+        let res_scroll_to = agent_system.run_task(task_scroll_to, dummy_api_key, dummy_api_url, dummy_model_name).await;
+        assert!(res_scroll_to.is_ok(), "SCROLL_TO failed: {:?}", res_scroll_to.err());
+        assert_eq!(res_scroll_to.unwrap(), "Agent 3 (Generic): Successfully scrolled to element 'css:#scroll-to-direct'");
+        dom_utils::cleanup_element(el_scroll);
+        document.body().unwrap().remove_attribute("style").unwrap();
+        web_sys::window().unwrap().scroll_to_with_x_and_y(0.0, 0.0); // Reset scroll
+
         // Example of agent selection still working (FormFiller for "TYPE" command with XPath)
         // The agent selection happens BEFORE parse_dom_command, so this test should still reflect the correct agent role.
         if let Err(e) = res_type_xpath { // Re-check res_type_xpath for agent role
@@ -871,7 +1131,7 @@ mod tests {
         
         // We need to check if the result_str contains the core parts of the expected message,
         // as the exact JsValue error string can be tricky.
-        assert!(result_str.contains("Error clicking element: ElementNotFound: No element found for selector 'css:#submitBtn'"), "Result string mismatch: {}", result_str);
+        assert!(result_str.contains("Command 0 ('Action: Click, Selector: \\'css:#submitBtn\\', Value: None, AttrName: None') failed: Error clicking element: ElementNotFound: No element found for selector 'css:#submitBtn'"), "Result string mismatch: {}", result_str);
         assert!(result_str.starts_with("[") && result_str.ends_with("]"), "Result string is not a JSON array: {}", result_str);
 
         // To make it more robust, let's parse the outer and inner JSON if possible
@@ -880,7 +1140,7 @@ mod tests {
                 assert_eq!(outer_array.len(), 1, "Expected one result in the outer array");
                 assert!(outer_array[0].is_err(), "Expected inner result to be an error");
                 let inner_error_msg = outer_array[0].as_ref().err().unwrap();
-                assert!(inner_error_msg.contains("Error clicking element: ElementNotFound: No element found for selector 'css:#submitBtn'"), "Inner error message mismatch: {}", inner_error_msg);
+                assert!(inner_error_msg.contains("Command 0 ('Action: Click, Selector: \\'css:#submitBtn\\', Value: None, AttrName: None') failed: Error clicking element: ElementNotFound: No element found for selector 'css:#submitBtn'"), "Inner error message mismatch: {}", inner_error_msg);
             }
             Err(e) => panic!("Failed to parse result_str as JSON array of results: {}, content: {}", e, result_str),
         }
@@ -902,12 +1162,12 @@ mod tests {
                 // First command: TYPE
                 assert!(results[0].is_err(), "Expected first command (TYPE) to result in an error (element not found)");
                 let err_msg1 = results[0].as_ref().err().unwrap();
-                assert!(err_msg1.contains("Error typing in element: ElementNotFound: No element found for selector 'css:#username'"), "Error message for TYPE incorrect: {}", err_msg1);
+                assert!(err_msg1.contains("Command 0 ('Action: Type, Selector: \\'css:#username\\', Value: Some(\\\"testuser\\\"), AttrName: None') failed: Error typing in element: ElementNotFound: No element found for selector 'css:#username'"), "Error message for TYPE incorrect: {}", err_msg1);
 
                 // Second command: CLICK
                 assert!(results[1].is_err(), "Expected second command (CLICK) to result in an error (element not found)");
                  let err_msg2 = results[1].as_ref().err().unwrap();
-                assert!(err_msg2.contains("Error clicking element: ElementNotFound: No element found for selector 'css:#loginBtn'"), "Error message for CLICK incorrect: {}", err_msg2);
+                assert!(err_msg2.contains("Command 1 ('Action: Click, Selector: \\'css:#loginBtn\\', Value: None, AttrName: None') failed: Error clicking element: ElementNotFound: No element found for selector 'css:#loginBtn'"), "Error message for CLICK incorrect: {}", err_msg2);
             }
             Err(e) => panic!("Failed to parse result_str as JSON array of results: {}, content: {}", e, result_str),
         }
@@ -967,7 +1227,7 @@ mod tests {
 
                 // 1. Valid CLICK (will fail due to missing element, which is fine)
                 assert!(results[0].is_err(), "Expected first command (CLICK) to result in an error");
-                assert!(results[0].as_ref().err().unwrap().contains("Error clicking element: ElementNotFound: No element found for selector 'css:#ok'"));
+                assert!(results[0].as_ref().err().unwrap().contains("Command 0 ('Action: Click, Selector: \\'css:#ok\\', Value: None, AttrName: None') failed: Error clicking element: ElementNotFound: No element found for selector 'css:#ok'"));
                 
                 // 2. Invalid action "INVALID_ACTION"
                 assert!(results[1].is_err(), "Expected second command (INVALID_ACTION) to be an error");
@@ -1053,6 +1313,39 @@ mod tests {
         let results_timeout: Vec<Result<String, String>> = serde_json::from_str(&result_timeout).unwrap();
         assert_eq!(results_timeout.len(), 1);
         assert!(results_timeout[0].is_err());
-        assert!(results_timeout[0].as_ref().err().unwrap().contains("Element 'css:#llm-wait-timeout' not found after 50ms timeout"));
+        assert!(results_timeout[0].as_ref().err().unwrap().contains("Command 0 ('Action: WaitForElement, Selector: \\'css:#llm-wait-timeout\\', Value: Some(\\\"50\\\"), AttrName: None') failed: Element 'css:#llm-wait-timeout' not found after 50ms timeout"));
+    }
+
+    #[cfg(feature = "mock-llm")]
+    #[wasm_bindgen_test]
+    async fn test_run_task_llm_json_mixed_validity_commands() {
+        let agent_system = AgentSystem::new();
+        let task = "task with mixed valid and malformed json commands";
+        // Mock response: [{"action": "CLICK", "selector": "css:#valid"}, {"invalid_field": "some_value", "action": "EXTRA_INVALID_FIELD"}, {"action": "TYPE", "selector": "css:#anotherValid", "value": "test"}]
+
+        let result = agent_system.run_task(task, "dummy_key", "dummy_url", "dummy_model").await;
+        assert!(result.is_ok(), "Expected Ok, got Err: {:?}", result.err());
+        let result_str = result.unwrap();
+
+        match serde_json::from_str::<Vec<Result<String, String>>>(&result_str) {
+            Ok(results) => {
+                assert_eq!(results.len(), 3, "Expected three results in the JSON array");
+
+                // 1. Valid CLICK (will fail due to missing element, which is fine for this test's purpose)
+                assert!(results[0].is_err(), "Expected first command (CLICK) to result in an error");
+                assert!(results[0].as_ref().err().unwrap().contains("Command 0 ('Action: Click, Selector: \\'css:#valid\\', Value: None, AttrName: None') failed: Error clicking element: ElementNotFound: No element found for selector 'css:#valid'"));
+
+                // 2. Malformed command object
+                assert!(results[1].is_err(), "Expected second command (malformed) to be an error");
+                let err_msg_malformed = results[1].as_ref().err().unwrap();
+                assert!(err_msg_malformed.contains("Command at index 1 was malformed and could not be parsed:"), "Malformed command error message mismatch: {}", err_msg_malformed);
+                assert!(err_msg_malformed.contains("invalid_field"), "Malformed command error did not contain original object snippet: {}", err_msg_malformed);
+
+                // 3. Valid TYPE (will fail due to missing element)
+                assert!(results[2].is_err(), "Expected third command (TYPE) to result in an error");
+                assert!(results[2].as_ref().err().unwrap().contains("Command 2 ('Action: Type, Selector: \\'css:#anotherValid\\', Value: Some(\\\"test\\\"), AttrName: None') failed: Error typing in element: ElementNotFound: No element found for selector 'css:#anotherValid'"));
+            }
+            Err(e) => panic!("Failed to parse result_str as JSON array of results: {}, content: {}", e, result_str),
+        }
     }
 }
